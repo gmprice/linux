@@ -30,6 +30,138 @@
 
 static struct cxl_region *to_cxl_region(struct device *dev);
 
+#define __ACCESS0_ATTR_RO(_name) {				\
+	.attr	= { .name = __stringify(_name), .mode = 0444 },	\
+	.show	= _name##_access0_show,				\
+}
+
+#define ACCESS0_DEVICE_ATTR_RO(_name) \
+	struct device_attribute dev_attr_access0_##_name = __ACCESS0_ATTR_RO(_name)
+
+#define ACCESS0_ATTR(attrib)					\
+static ssize_t attrib##_access0_show(struct device *dev,	\
+			   struct device_attribute *attr,	\
+			   char *buf)				\
+{								\
+	struct cxl_region *cxlr = to_cxl_region(dev);		\
+								\
+	if (cxlr->coord[0].attrib == 0)				\
+		return -ENOENT;					\
+								\
+	return sysfs_emit(buf, "%u\n", cxlr->coord[0].attrib);	\
+}								\
+static ACCESS0_DEVICE_ATTR_RO(attrib)
+
+ACCESS0_ATTR(read_bandwidth);
+ACCESS0_ATTR(read_latency);
+ACCESS0_ATTR(write_bandwidth);
+ACCESS0_ATTR(write_latency);
+
+static struct attribute *access0_coordinate_attrs[] = {
+	&dev_attr_access0_read_bandwidth.attr,
+	&dev_attr_access0_write_bandwidth.attr,
+	&dev_attr_access0_read_latency.attr,
+	&dev_attr_access0_write_latency.attr,
+	NULL,
+};
+
+static umode_t cxl_region_access0_coordinate_visible(struct kobject *kobj,
+						     struct attribute *a, int n)
+{
+	struct device *dev = kobj_to_dev(kobj);
+	struct cxl_region *cxlr = to_cxl_region(dev);
+
+	if (a == &dev_attr_access0_read_latency.attr &&
+	    cxlr->coord[ACCESS_COORDINATE_LOCAL].read_latency == 0)
+		return 0;
+
+	if (a == &dev_attr_access0_write_latency.attr &&
+	    cxlr->coord[ACCESS_COORDINATE_LOCAL].write_latency == 0)
+		return 0;
+
+	if (a == &dev_attr_access0_read_bandwidth.attr &&
+	    cxlr->coord[ACCESS_COORDINATE_LOCAL].read_bandwidth == 0)
+		return 0;
+
+	if (a == &dev_attr_access0_write_bandwidth.attr &&
+	    cxlr->coord[ACCESS_COORDINATE_LOCAL].write_bandwidth == 0)
+		return 0;
+
+	return a->mode;
+}
+
+#define __ACCESS1_ATTR_RO(_name) {				\
+	.attr	= { .name = __stringify(_name), .mode = 0444 },	\
+	.show	= _name##_access1_show,				\
+}
+
+#define ACCESS1_DEVICE_ATTR_RO(_name) \
+	struct device_attribute dev_attr_access1_##_name = __ACCESS1_ATTR_RO(_name)
+
+#define ACCESS1_ATTR(attrib)					\
+static ssize_t attrib##_access1_show(struct device *dev,	\
+			   struct device_attribute *attr,	\
+			   char *buf)				\
+{								\
+	struct cxl_region *cxlr = to_cxl_region(dev);		\
+								\
+	if (cxlr->coord[1].attrib == 0)				\
+		return -ENOENT;					\
+								\
+	return sysfs_emit(buf, "%u\n", cxlr->coord[1].attrib);	\
+}								\
+static ACCESS1_DEVICE_ATTR_RO(attrib)
+
+ACCESS1_ATTR(read_bandwidth);
+ACCESS1_ATTR(read_latency);
+ACCESS1_ATTR(write_bandwidth);
+ACCESS1_ATTR(write_latency);
+
+static struct attribute *access1_coordinate_attrs[] = {
+	&dev_attr_access1_read_bandwidth.attr,
+	&dev_attr_access1_write_bandwidth.attr,
+	&dev_attr_access1_read_latency.attr,
+	&dev_attr_access1_write_latency.attr,
+	NULL,
+};
+
+static umode_t cxl_region_access1_coordinate_visible(struct kobject *kobj,
+						     struct attribute *a, int n)
+{
+	struct device *dev = kobj_to_dev(kobj);
+	struct cxl_region *cxlr = to_cxl_region(dev);
+
+	if (a == &dev_attr_access1_read_latency.attr &&
+	    cxlr->coord[ACCESS_COORDINATE_CPU].read_latency == 0)
+		return 0;
+
+	if (a == &dev_attr_access1_write_latency.attr &&
+	    cxlr->coord[ACCESS_COORDINATE_CPU].write_latency == 0)
+		return 0;
+
+	if (a == &dev_attr_access1_read_bandwidth.attr &&
+	    cxlr->coord[ACCESS_COORDINATE_CPU].read_bandwidth == 0)
+		return 0;
+
+	if (a == &dev_attr_access1_write_bandwidth.attr &&
+	    cxlr->coord[ACCESS_COORDINATE_CPU].write_bandwidth == 0)
+		return 0;
+
+	return a->mode;
+}
+
+static const struct attribute_group cxl_region_access0_coordinate_group = {
+	.name = "access0",
+	.attrs = access0_coordinate_attrs,
+	.is_visible = cxl_region_access0_coordinate_visible,
+};
+
+static const struct attribute_group cxl_region_access1_coordinate_group = {
+	.name = "access1",
+	.attrs = access1_coordinate_attrs,
+	.is_visible = cxl_region_access1_coordinate_visible,
+};
+
 static ssize_t uuid_show(struct device *dev, struct device_attribute *attr,
 			 char *buf)
 {
@@ -2039,6 +2171,8 @@ static const struct attribute_group *region_groups[] = {
 	&cxl_base_attribute_group,
 	&cxl_region_group,
 	&cxl_region_target_group,
+	&cxl_region_access0_coordinate_group,
+	&cxl_region_access1_coordinate_group,
 	NULL,
 };
 
