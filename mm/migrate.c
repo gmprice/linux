@@ -2045,27 +2045,66 @@ static int do_move_pages_to_node(struct list_head *pagelist, int node)
 }
 
 /*
- * Resolves the given address to a struct page, isolates it from the LRU and
- * puts it to the given pagelist.
+ * Isolates the page from the LRU and puts it into the given pagelist
  * Returns:
- *     errno - if the page cannot be found/isolated
+ *     errno - if cannot be migrated/isolated
  *     0 - when it doesn't have to be migrated because it is already on the
  *         target node
  *     1 - when it has been queued
  */
-static int add_page_for_migration(struct mm_struct *mm, const void __user *p,
-		int node, struct list_head *pagelist, bool migrate_all)
+static int add_page_for_migration(struct page *page, int node,
+		struct list_head *pagelist, bool migrate_all)
+{
+	if (is_zone_device_page(page))
+		return -ENOENT;
+
+	if (page_to_nid(page) == node)
+		return 0;
+
+	if (page_mapcount(page) > 1 && !migrate_all)
+		return -EACCES;
+
+	if (PageHuge(page)) {
+		if (!PageHead(page))
+			return -EACCES;
+		if (!isolate_hugetlb(page_folio(page), pagelist))
+			return -EBUSY;
+	} else {
+		struct page *head;
+
+		head = compound_head(page);
+		if (!isolate_lru_page(head))
+			return -EBUSY;
+
+		list_add_tail(&head->lru, pagelist);
+		mod_node_page_state(page_pgdat(head),
+			NR_ISOLATED_ANON + page_is_file_lru(head),
+			thp_nr_pages(head));
+	}
+	return 1;
+}
+
+/*
+ * Resolves the given address to a struct page, isolates it from the LRU and
+ * puts it to the given pagelist.
+ * Returns:
+ *     errno - if the page cannot be found/isolated/migrated
+ *     0 - when it doesn't have to be migrated because it is already on the
+ *         target node
+ *     1 - when it has been queued
+ */
+static int add_virt_page_for_migration(struct mm_struct *mm,
+		const void __user *p, int node, struct list_head *pagelist,
+		bool migrate_all)
 {
 	struct vm_area_struct *vma;
 	unsigned long addr;
 	struct page *page;
-	int err;
-	bool isolated;
+	int err = -EFAULT;
 
 	mmap_read_lock(mm);
 	addr = (unsigned long)untagged_addr_remote(mm, p);
 
-	err = -EFAULT;
 	vma = vma_lookup(mm, addr);
 	if (!vma || !vma_migratable(vma))
 		goto out;
@@ -2081,44 +2120,8 @@ static int add_page_for_migration(struct mm_struct *mm, const void __user *p,
 	if (!page)
 		goto out;
 
-	if (is_zone_device_page(page))
-		goto out_putpage;
+	err = add_page_for_migration(page, node, pagelist, migrate_all);
 
-	err = 0;
-	if (page_to_nid(page) == node)
-		goto out_putpage;
-
-	err = -EACCES;
-	if (page_mapcount(page) > 1 && !migrate_all)
-		goto out_putpage;
-
-	if (PageHuge(page)) {
-		if (PageHead(page)) {
-			isolated = isolate_hugetlb(page_folio(page), pagelist);
-			err = isolated ? 1 : -EBUSY;
-		}
-	} else {
-		struct page *head;
-
-		head = compound_head(page);
-		isolated = isolate_lru_page(head);
-		if (!isolated) {
-			err = -EBUSY;
-			goto out_putpage;
-		}
-
-		err = 1;
-		list_add_tail(&head->lru, pagelist);
-		mod_node_page_state(page_pgdat(head),
-			NR_ISOLATED_ANON + page_is_file_lru(head),
-			thp_nr_pages(head));
-	}
-out_putpage:
-	/*
-	 * Either remove the duplicate refcount from
-	 * isolate_lru_page() or drop the page ref if it was
-	 * not isolated.
-	 */
 	put_page(page);
 out:
 	mmap_read_unlock(mm);
@@ -2214,7 +2217,7 @@ static int do_pages_move(struct mm_struct *mm, nodemask_t task_nodes,
 		 * Errors in the page lookup or isolation are not fatal and we simply
 		 * report them via status
 		 */
-		err = add_page_for_migration(mm, p, current_node, &pagelist,
+		err = add_virt_page_for_migration(mm, p, current_node, &pagelist,
 					     flags & MPOL_MF_MOVE_ALL);
 
 		if (err > 0) {
