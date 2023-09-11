@@ -2051,7 +2051,7 @@ static int do_move_pages_to_node(struct mm_struct *mm,
  *         target node
  *     1 - when it has been queued
  */
-static int add_page_for_migration(struct mm_struct *mm, const void __user *p,
+static int add_page_for_migration(struct mm_struct *mm, const __u64 p,
 		int node, struct list_head *pagelist, bool migrate_all)
 {
 	struct vm_area_struct *vma;
@@ -2155,7 +2155,7 @@ static int move_pages_and_store_status(struct mm_struct *mm, int node,
  */
 static int do_pages_move(struct mm_struct *mm, nodemask_t task_nodes,
 			 unsigned long nr_pages,
-			 const void __user * __user *pages,
+			 const __u64 __user *pages,
 			 const int __user *nodes,
 			 int __user *status, int flags)
 {
@@ -2167,7 +2167,7 @@ static int do_pages_move(struct mm_struct *mm, nodemask_t task_nodes,
 	lru_cache_disable();
 
 	for (i = start = 0; i < nr_pages; i++) {
-		const void __user *p;
+		__u64 p;
 		int node;
 
 		err = -EFAULT;
@@ -2250,7 +2250,7 @@ out:
  * Determine the nodes of an array of pages and store it in an array of status.
  */
 static void do_pages_stat_array(struct mm_struct *mm, unsigned long nr_pages,
-				const void __user **pages, int *status)
+				const __u64 *pages, int *status)
 {
 	unsigned long i;
 
@@ -2291,8 +2291,8 @@ set_status:
 	mmap_read_unlock(mm);
 }
 
-static int get_compat_pages_array(const void __user *chunk_pages[],
-				  const void __user * __user *pages,
+static int get_compat_pages_array(__u64 chunk_pages[],
+				  const __u64 __user *pages,
 				  unsigned long chunk_nr)
 {
 	compat_uptr_t __user *pages32 = (compat_uptr_t __user *)pages;
@@ -2302,7 +2302,7 @@ static int get_compat_pages_array(const void __user *chunk_pages[],
 	for (i = 0; i < chunk_nr; i++) {
 		if (get_user(p, pages32 + i))
 			return -EFAULT;
-		chunk_pages[i] = compat_ptr(p);
+		chunk_pages[i] = (__u64)compat_ptr(p);
 	}
 
 	return 0;
@@ -2313,11 +2313,11 @@ static int get_compat_pages_array(const void __user *chunk_pages[],
  * a user array of status.
  */
 static int do_pages_stat(struct mm_struct *mm, unsigned long nr_pages,
-			 const void __user * __user *pages,
+			 const __u64 __user *pages,
 			 int __user *status)
 {
 #define DO_PAGES_STAT_CHUNK_NR 16UL
-	const void __user *chunk_pages[DO_PAGES_STAT_CHUNK_NR];
+	__u64 chunk_pages[DO_PAGES_STAT_CHUNK_NR];
 	int chunk_status[DO_PAGES_STAT_CHUNK_NR];
 
 	while (nr_pages) {
@@ -2397,7 +2397,7 @@ out:
  * process.
  */
 static int kernel_move_pages(pid_t pid, unsigned long nr_pages,
-			     const void __user * __user *pages,
+			     const __u64 __user *pages,
 			     const int __user *nodes,
 			     int __user *status, int flags)
 {
@@ -2427,7 +2427,7 @@ static int kernel_move_pages(pid_t pid, unsigned long nr_pages,
 }
 
 SYSCALL_DEFINE6(move_pages, pid_t, pid, unsigned long, nr_pages,
-		const void __user * __user *, pages,
+		const __u64 __user *, pages,
 		const int __user *, nodes,
 		int __user *, status, int, flags)
 {
