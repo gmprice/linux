@@ -102,6 +102,7 @@
 #include <linux/mmu_notifier.h>
 #include <linux/printk.h>
 #include <linux/swapops.h>
+#include <linux/memory-tiers.h>
 
 #include <asm/tlbflush.h>
 #include <asm/tlb.h>
@@ -300,6 +301,7 @@ static struct mempolicy *mpol_new(unsigned short mode, unsigned short flags,
 	policy->mode = mode;
 	policy->flags = flags;
 	policy->home_node = NUMA_NO_NODE;
+	policy->cur_weight = 0;
 
 	return policy;
 }
@@ -334,6 +336,7 @@ static void mpol_rebind_nodemask(struct mempolicy *pol, const nodemask_t *nodes)
 		tmp = *nodes;
 
 	pol->nodes = tmp;
+	pol->cur_weight = 0;
 }
 
 static void mpol_rebind_preferred(struct mempolicy *pol,
@@ -881,8 +884,11 @@ static long do_set_mempolicy(unsigned short mode, unsigned short flags,
 
 	old = current->mempolicy;
 	current->mempolicy = new;
-	if (new && new->mode == MPOL_INTERLEAVE)
+	if (new && new->mode == MPOL_INTERLEAVE) {
 		current->il_prev = MAX_NUMNODES-1;
+		new->cur_weight = 0;
+	}
+
 	task_unlock(current);
 	mpol_put(old);
 	ret = 0;
@@ -1901,12 +1907,22 @@ static int policy_node(gfp_t gfp, struct mempolicy *policy, int nd)
 /* Do dynamic interleaving for a process */
 static unsigned interleave_nodes(struct mempolicy *policy)
 {
-	unsigned next;
+	unsigned int next;
+	unsigned char next_weight;
 	struct task_struct *me = current;
 
 	next = next_node_in(me->il_prev, policy->nodes);
-	if (next < MAX_NUMNODES)
+	if (!policy->cur_weight) {
+		/* If the node is set, at least 1 allocation is required */
+		next_weight = memtier_get_node_weight(numa_node_id(), next);
+
+		policy->cur_weight = next_weight ? next_weight : 1;
+	}
+
+	policy->cur_weight--;
+	if (next < MAX_NUMNODES && !policy->cur_weight)
 		me->il_prev = next;
+
 	return next;
 }
 
@@ -1965,25 +1981,37 @@ unsigned int mempolicy_slab_node(void)
 static unsigned offset_il_node(struct mempolicy *pol, unsigned long n)
 {
 	nodemask_t nodemask = pol->nodes;
-	unsigned int target, nnodes;
-	int i;
+	unsigned int target, nnodes, il_weight;
+	unsigned char weight;
 	int nid;
+	int cur_node = numa_node_id();
+
 	/*
 	 * The barrier will stabilize the nodemask in a register or on
 	 * the stack so that it will stop changing under the code.
 	 *
 	 * Between first_node() and next_node(), pol->nodes could be changed
 	 * by other threads. So we put pol->nodes in a local stack.
+	 *
+	 * Additionally, place the cur_node on the stack in case of a migration
 	 */
 	barrier();
 
 	nnodes = nodes_weight(nodemask);
 	if (!nnodes)
-		return numa_node_id();
-	target = (unsigned int)n % nnodes;
+		return cur_node;
+
+	il_weight = memtier_get_total_weight(cur_node, &nodemask);
+	target = (unsigned int)n % il_weight;
 	nid = first_node(nodemask);
-	for (i = 0; i < target; i++)
-		nid = next_node(nid, nodemask);
+	while (target) {
+		weight = memtier_get_node_weight(cur_node, nid);
+		if (target < weight)
+			break;
+		target -= weight;
+		nid = next_node_in(nid, nodemask);
+	}
+
 	return nid;
 }
 
@@ -2317,32 +2345,103 @@ static unsigned long alloc_pages_bulk_array_interleave(gfp_t gfp,
 		struct mempolicy *pol, unsigned long nr_pages,
 		struct page **page_array)
 {
-	int nodes;
-	unsigned long nr_pages_per_node;
-	int delta;
-	int i;
-	unsigned long nr_allocated;
+	struct task_struct *me = current;
 	unsigned long total_allocated = 0;
+	unsigned long nr_allocated;
+	unsigned long rounds;
+	unsigned long node_pages, delta;
+	unsigned char weight;
+	unsigned long il_weight;
+	unsigned long req_pages = nr_pages;
+	int nnodes, node, prev_node;
+	int cur_node = numa_node_id();
+	int i;
 
-	nodes = nodes_weight(pol->nodes);
-	nr_pages_per_node = nr_pages / nodes;
-	delta = nr_pages - nodes * nr_pages_per_node;
-
-	for (i = 0; i < nodes; i++) {
-		if (delta) {
-			nr_allocated = __alloc_pages_bulk(gfp,
-					interleave_nodes(pol), NULL,
-					nr_pages_per_node + 1, NULL,
-					page_array);
-			delta--;
-		} else {
-			nr_allocated = __alloc_pages_bulk(gfp,
-					interleave_nodes(pol), NULL,
-					nr_pages_per_node, NULL, page_array);
-		}
-
+	prev_node = me->il_prev;
+	nnodes = nodes_weight(pol->nodes);
+	/* Continue allocating from most recent node */
+	if (pol->cur_weight) {
+		node = next_node_in(prev_node, pol->nodes);
+		node_pages = pol->cur_weight;
+		if (node_pages > nr_pages)
+			node_pages = nr_pages;
+		nr_allocated = __alloc_pages_bulk(gfp, node, NULL, node_pages,
+						  NULL, page_array);
 		page_array += nr_allocated;
 		total_allocated += nr_allocated;
+		/* if that's all the pages, no need to interleave */
+		if (req_pages <= pol->cur_weight) {
+			pol->cur_weight -= req_pages;
+			return total_allocated;
+		}
+		/* Otherwise we adjust req_pages down, and continue from there */
+		req_pages -= pol->cur_weight;
+		pol->cur_weight = 0;
+		prev_node = node;
+	}
+
+	/* Now continue allocating from subsequent nodes */
+	il_weight = memtier_get_total_weight(cur_node, &pol->nodes);
+	rounds = req_pages / il_weight;
+	delta = req_pages % il_weight;
+	for (i = 0; i < nnodes; i++) {
+		node = next_node_in(prev_node, pol->nodes);
+		weight = memtier_get_node_weight(cur_node, node);
+		node_pages = weight * rounds;
+		if (delta > weight) {
+			node_pages += weight;
+			delta -= weight;
+		} else if (delta) {
+			node_pages += delta;
+			delta = 0;
+		}
+		/* The number of requested pages may not hit every node */
+		if (!node_pages)
+			break;
+		/*
+		 * Weights may change during this process, if this occurs and
+		 * it would cause over-allocation, floor it.
+		 */
+		if (node_pages + total_allocated > nr_pages) {
+			node_pages = nr_pages - total_allocated;
+			delta = 0;
+		}
+		nr_allocated = __alloc_pages_bulk(gfp, node, NULL, node_pages,
+						  NULL, page_array);
+		page_array += nr_allocated;
+		total_allocated += nr_allocated;
+		prev_node = node;
+	}
+
+	/*
+	 * If during the process of interleaving the weights changed downward,
+	 * there may be unallocated pages at the end. Allocate on local node,
+	 * and simply start the interleave cycle over.
+	 */
+	if (total_allocated != nr_pages) {
+		node = numa_node_id();
+		node_pages = nr_pages - total_allocated;
+		nr_allocated = __alloc_pages_bulk(gfp, node, NULL, node_pages,
+						  NULL, page_array);
+		page_array += nr_allocated;
+		total_allocated += nr_allocated;
+		node_pages = 0;
+	}
+
+	/*
+	 * Finally, we need to update me->il_prev and pol->cur_weight
+	 * if there were overflow pages, but not equivalent to the node
+	 * weight, set the cur_weight to node_weight - delta and the
+	 * me->il_prev to the previous node. Otherwise if it was perfect
+	 * we can simply set il_prev to node and cur_weight to 0
+	 */
+	if (node_pages) {
+		me->il_prev = prev_node;
+		node_pages %= weight;
+		pol->cur_weight = weight - node_pages;
+	} else {
+		me->il_prev = node;
+		pol->cur_weight = 0;
 	}
 
 	return total_allocated;
