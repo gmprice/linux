@@ -458,3 +458,5 @@
 451	i386	cachestat		sys_cachestat
 452	i386	fchmodat2		sys_fchmodat2
 454	i386	move_phys_pages		sys_move_phys_pages
+455	i386	set_mempolicy2		sys_set_mempolicy2
+456	i386	get_mempolicy2		sys_get_mempolicy2

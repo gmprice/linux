@@ -827,10 +827,14 @@ __SYSCALL(__NR_fchmodat2, sys_fchmodat2)
 #ifndef __ARCH_NOMMU
 #define __NR_move_phys_pages 454
 __SYSCALL(__NR_move_phys_pages, sys_move_phys_pages)
+#define __NR_set_mempolicy 455
+__SYSCALL(__NR_set_mempolicy2, sys_set_mempolicy2)
+#define __NR_set_mempolicy 456
+__SYSCALL(__NR_get_mempolicy2, sys_get_mempolicy2)
 #endif
 
 #undef __NR_syscalls
-#define __NR_syscalls 455
+#define __NR_syscalls 457
 
 /*
  * 32 bit systems traditionally used different
