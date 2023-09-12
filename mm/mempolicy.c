@@ -102,6 +102,7 @@
 #include <linux/mmu_notifier.h>
 #include <linux/printk.h>
 #include <linux/swapops.h>
+#include <linux/memory-tiers.h>
 
 #include <asm/tlbflush.h>
 #include <asm/tlb.h>
@@ -881,8 +882,11 @@ static long do_set_mempolicy(unsigned short mode, unsigned short flags,
 
 	old = current->mempolicy;
 	current->mempolicy = new;
-	if (new && new->mode == MPOL_INTERLEAVE)
+	if (new && (new->mode == MPOL_INTERLEAVE)) {
 		current->il_prev = MAX_NUMNODES-1;
+		new->cur_weight = 0;
+	}
+
 	task_unlock(current);
 	mpol_put(old);
 	ret = 0;
@@ -1898,11 +1902,36 @@ static int policy_node(gfp_t gfp, struct mempolicy *policy, int nd)
 	return nd;
 }
 
+static unsigned int weighted_interleave_nodes(struct mempolicy *policy)
+{
+	unsigned int next;
+	unsigned char next_weight;
+	struct task_struct *me = current;
+
+	/* When weight reaches 0, we're on a new node, reset the weight */
+	next = next_node_in(me->il_prev, policy->nodes);
+	if (!policy->cur_weight) {
+		/* If the node is set, at least 1 allocation is required */
+		next_weight = memtier_get_node_weight(numa_node_id(), next);
+
+		policy->cur_weight = next_weight ? next_weight : 1;
+	}
+
+	policy->cur_weight--;
+	if (next < MAX_NUMNODES && !policy->cur_weight)
+		me->il_prev = next;
+
+	return next;
+}
+
 /* Do dynamic interleaving for a process */
 static unsigned interleave_nodes(struct mempolicy *policy)
 {
 	unsigned next;
 	struct task_struct *me = current;
+
+	if (policy->flags & MPOL_F_WEIGHTED_INTERLEAVE)
+		return weighted_interleave_nodes(policy);
 
 	next = next_node_in(me->il_prev, policy->nodes);
 	if (next < MAX_NUMNODES)
@@ -1957,6 +1986,43 @@ unsigned int mempolicy_slab_node(void)
 	}
 }
 
+static unsigned int offset_wil_node(struct mempolicy *pol, unsigned long n)
+{
+	nodemask_t nodemask = pol->nodes;
+	unsigned int target, nnodes, il_weight;
+	unsigned char weight;
+	int nid;
+	int cur_node = numa_node_id();
+
+	/*
+	 * The barrier will stabilize the nodemask in a register or on
+	 * the stack so that it will stop changing under the code.
+	 *
+	 * Between first_node() and next_node(), pol->nodes could be changed
+	 * by other threads. So we put pol->nodes in a local stack.
+	 */
+	barrier();
+
+	nnodes = nodes_weight(nodemask);
+	if (!nnodes)
+		return cur_node;
+
+	il_weight = memtier_get_total_weight(cur_node, &pol->nodes);
+	target = (unsigned int)n % il_weight;
+	nid = first_node(nodemask);
+	while (target) {
+		weight = memtier_get_node_weight(cur_node, nid);
+		/* If weights are being recaculated, revert to interleave */
+		if (!weight)
+			weight = 1;
+		if (target < weight)
+			break;
+		target -= weight;
+		nid = next_node_in(nid, nodemask);
+	}
+	return nid;
+}
+
 /*
  * Do static interleaving for a VMA with known offset @n.  Returns the n'th
  * node in pol->nodes (starting from n=0), wrapping around if n exceeds the
@@ -1964,10 +2030,16 @@ unsigned int mempolicy_slab_node(void)
  */
 static unsigned offset_il_node(struct mempolicy *pol, unsigned long n)
 {
-	nodemask_t nodemask = pol->nodes;
+	nodemask_t nodemask;
 	unsigned int target, nnodes;
 	int i;
 	int nid;
+
+	if (pol->flags & MPOL_F_WEIGHTED_INTERLEAVE)
+		return offset_wil_node(pol, n);
+
+	nodemask = pol->nodes;
+
 	/*
 	 * The barrier will stabilize the nodemask in a register or on
 	 * the stack so that it will stop changing under the code.
@@ -2313,6 +2385,86 @@ struct folio *folio_alloc(gfp_t gfp, unsigned order)
 }
 EXPORT_SYMBOL(folio_alloc);
 
+static unsigned long alloc_pages_bulk_array_weighted_interleave(gfp_t gfp,
+	struct mempolicy *pol, unsigned long nr_pages,
+	struct page **page_array)
+{
+	struct task_struct *me = current;
+	unsigned long total_allocated = 0;
+	unsigned long nr_allocated;
+	unsigned long rounds;
+	unsigned long node_pages, delta;
+	unsigned char weight;
+	unsigned long il_weight;
+	int nnodes, node, prev_node;
+	int cur_node = numa_node_id();
+	int i;
+
+	nnodes = nodes_weight(pol->nodes);
+	/* Continue allocating from most recent node and adjust the nr_pages */
+	if (pol->cur_weight) {
+		node = next_node_in(me->il_prev, pol->nodes);
+		node_pages = pol->cur_weight;
+		nr_allocated = __alloc_pages_bulk(gfp, node, NULL, node_pages,
+						  NULL, page_array);
+		page_array += nr_allocated;
+		total_allocated += nr_allocated;
+		/* if that's all the pages, no need to interleave */
+		if (nr_pages <= pol->cur_weight) {
+			pol->cur_weight -= nr_pages;
+			return total_allocated;
+		}
+		/* Otherwise we adjust nr_pages down, and continue from there */
+		nr_pages -= pol->cur_weight;
+		pol->cur_weight = 0;
+		prev_node = node;
+	}
+
+	/* Now we can continue allocating from this point */
+	il_weight = memtier_get_total_weight(cur_node, &pol->nodes);
+	rounds = nr_pages / il_weight;
+	delta = nr_pages % il_weight;
+	for (i = 0; i < nnodes; i++) {
+		node = next_node_in(prev_node, pol->nodes);
+		weight = memtier_get_node_weight(cur_node, node);
+		node_pages = weight * rounds;
+		if (delta) {
+			if (delta > weight) {
+				node_pages += weight;
+				delta -= weight;
+			} else {
+				node_pages += delta;
+				delta = 0;
+			}
+		}
+		/* We may not make it all the way around */
+		if (!node_pages)
+			break;
+		nr_allocated = __alloc_pages_bulk(gfp, node, NULL, node_pages,
+						  NULL, page_array);
+		page_array += nr_allocated;
+		total_allocated += nr_allocated;
+		prev_node = node;
+	}
+
+	/*
+	 * Finally, we need to update me->il_prev and pol->cur_weight
+	 * if there were overflow pages, but not equivalent to the node
+	 * weight, set the cur_weight to node_weight - delta and the
+	 * me->il_prev to the previous node. Otherwise if it was perfect
+	 * we can simply set il_prev to node and cur_weight to 0
+	 */
+	if (node_pages) {
+		me->il_prev = prev_node;
+		pol->cur_weight = weight - node_pages;
+	} else {
+		me->il_prev = node;
+		pol->cur_weight = 0;
+	}
+
+	return total_allocated;
+}
+
 static unsigned long alloc_pages_bulk_array_interleave(gfp_t gfp,
 		struct mempolicy *pol, unsigned long nr_pages,
 		struct page **page_array)
@@ -2323,6 +2475,11 @@ static unsigned long alloc_pages_bulk_array_interleave(gfp_t gfp,
 	int i;
 	unsigned long nr_allocated;
 	unsigned long total_allocated = 0;
+
+	if (pol->flags & MPOL_F_WEIGHTED_INTERLEAVE)
+		return alloc_pages_bulk_array_weighted_interleave(gfp, pol,
+								  nr_pages,
+								  page_array);
 
 	nodes = nodes_weight(pol->nodes);
 	nr_pages_per_node = nr_pages / nodes;
