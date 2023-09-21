@@ -2034,4 +2034,128 @@ const struct file_operations proc_pid_numa_maps_operations = {
 	.release	= proc_map_release,
 };
 
+
+static void *mempolicy_start(struct seq_file *m, loff_t *pos)
+{
+	struct proc_maps_private *priv = m->private;
+
+	if (*pos >= MAX_NUMNODES)
+		return NULL;
+
+	priv->task = get_proc_task(priv->inode);
+	if (!priv->task)
+		return ERR_PTR(-ESRCH);
+
+	hold_task_mempolicy(priv);
+
+	return pos;
+}
+
+static void *mempolicy_next(struct seq_file *m, void *v, loff_t *pos)
+{
+	if (*pos + 1 >= MAX_NUMNODES)
+		return NULL;
+	(*pos)++;
+	return pos;
+}
+
+static void mempolicy_stop(struct seq_file *m, void *v)
+{
+	struct proc_maps_private *priv = m->private;
+
+	if (!priv->task)
+		return;
+
+	release_task_mempolicy(priv);
+	put_task_struct(priv->task);
+	priv->task = NULL;
+}
+
+static int mempolicy_show(struct seq_file *m, void *v)
+{
+	struct proc_maps_private *priv = m->private;
+	int node = *((loff_t *)v);
+	unsigned int weight;
+
+	if (!priv->task_mempolicy)
+		return -ENODEV;
+
+	if (node > MAX_NUMNODES)
+		return -EINVAL;
+
+	weight = priv->task_mempolicy->weights[node];
+
+	seq_printf(m, "%d\n", weight);
+
+	return 0;
+}
+
+static const struct seq_operations mempolicy_ops = {
+	.start = mempolicy_start,
+	.next  = mempolicy_next,
+	.stop  = mempolicy_stop,
+	.show  = mempolicy_show,
+};
+
+static int pid_mempolicy_open(struct inode *inode, struct file *file)
+{
+	return proc_maps_open(inode, file, &mempolicy_ops,
+				sizeof(struct proc_maps_private));
+}
+
+static ssize_t mempolicy_weight_write(struct file *file,
+				      const char __user *user_buf,
+				      size_t count, loff_t *ppos)
+{
+	struct task_struct *task;
+	struct mempolicy *mempolicy;
+	int node = (int)*ppos;
+	unsigned int weight;
+	int ret = 0;
+
+	task = get_proc_task(file_inode(file));
+	task_lock(task);
+	mempolicy = get_task_policy(task);
+	mpol_get(mempolicy);
+	task_unlock(task);
+
+	if (!mempolicy) {
+		ret = -ENODEV;
+		goto out_task;
+	}
+
+	if (*ppos > MAX_NUMNODES) {
+		ret = -ERANGE;
+		goto out_mempolicy;
+	}
+
+	if (kstrtouint_from_user(user_buf, count, 10, &weight) ||
+		weight == 0 ||
+		!node_isset(node, mempolicy->nodes)) {
+		ret = -EINVAL;
+		goto out_mempolicy;
+	}
+
+	mempolicy->interleave_weight -= mempolicy->weights[node];
+	mempolicy->interleave_weight += weight;
+	mempolicy->weights[node] = weight;
+	ret = count;
+
+out_mempolicy:
+	mpol_put(mempolicy);
+out_task:
+	put_task_struct(task);
+
+	*ppos += 1;
+	return ret;
+}
+
+const struct file_operations mempolicy_operations = {
+	.open    = pid_mempolicy_open,
+	.read    = seq_read,
+	.llseek   = seq_lseek,
+	.release = proc_map_release,
+	.write   = mempolicy_weight_write,
+};
+
 #endif /* CONFIG_NUMA */

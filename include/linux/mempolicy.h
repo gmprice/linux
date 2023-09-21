@@ -52,6 +52,10 @@ struct mempolicy {
 		nodemask_t cpuset_mems_allowed;	/* relative to these nodes */
 		nodemask_t user_nodemask;	/* nodemask passed by user */
 	} w;
+
+	unsigned int curweight; /* Remaining allocations on the current node */
+	unsigned int weights[MAX_NUMNODES]; /* interleave weights per-node */
+	unsigned long interleave_weight; /* sum of all weights */
 };
 
 /*
