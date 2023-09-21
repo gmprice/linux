@@ -52,6 +52,10 @@ struct mempolicy {
 		nodemask_t cpuset_mems_allowed;	/* relative to these nodes */
 		nodemask_t user_nodemask;	/* nodemask passed by user */
 	} w;
+
+	unsigned char curweight; /* Remaining allocations on current node */
+	unsigned char weights[MAX_NUMNODES]; /* interleave weight per-node */
+	unsigned int interleave_weight; /* sum of all weights */
 };
 
 /*
@@ -184,6 +188,8 @@ static inline bool mpol_is_preferred_many(struct mempolicy *pol)
 
 extern bool apply_policy_zone(struct mempolicy *policy, enum zone_type zone);
 
+extern long mpol_set_interleave_weights(struct task_struct *task, int *nodes,
+					unsigned char *weights, int count);
 #else
 
 struct mempolicy {};
@@ -291,6 +297,14 @@ static inline void mpol_put_task_policy(struct task_struct *task)
 static inline bool mpol_is_preferred_many(struct mempolicy *pol)
 {
 	return  false;
+}
+
+static inline long mpol_set_interleave_weights(struct task_struct *task,
+					       int *nodes,
+					       unsigned char *weights,
+					       int count)
+{
+	return -ENODEV;
 }
 
 #endif /* CONFIG_NUMA */

@@ -2034,4 +2034,165 @@ const struct file_operations proc_pid_numa_maps_operations = {
 	.release	= proc_map_release,
 };
 
+
+static void *il_weights_start(struct seq_file *m, loff_t *pos)
+{
+	struct proc_maps_private *priv = m->private;
+
+	if (*pos >= MAX_NUMNODES)
+		return NULL;
+
+	priv->task = get_proc_task(priv->inode);
+	if (!priv->task)
+		return ERR_PTR(-ESRCH);
+
+	return pos;
+}
+
+static void *il_weights_next(struct seq_file *m, void *v, loff_t *pos)
+{
+	return NULL;
+}
+
+static void il_weights_stop(struct seq_file *m, void *v)
+{
+	struct proc_maps_private *priv = m->private;
+
+	if (!priv->task)
+		return;
+
+	put_task_struct(priv->task);
+	priv->task = NULL;
+}
+
+static int il_weights_show(struct seq_file *m, void *v)
+{
+	struct proc_maps_private *priv = m->private;
+	unsigned int weight, node, count = 0;
+
+	if (!priv->task_mempolicy)
+		return -ENODEV;
+
+	if (node > MAX_NUMNODES)
+		return -EINVAL;
+
+	node = first_node(priv->task_mempolicy->nodes);
+	while (node < MAX_NUMNODES) {
+		weight = priv->task_mempolicy->weights[node];
+		if (weight) {
+			if (count++)
+				seq_puts(m, ",");
+			seq_printf(m, "%d:%u", node, weight);
+		}
+		next_node(node, priv->task_mempolicy->nodes);
+	}
+	seq_puts(m, "\n");
+	return 0;
+}
+
+static const struct seq_operations il_weights_ops = {
+	.start = il_weights_start,
+	.next  = il_weights_next,
+	.stop  = il_weights_stop,
+	.show  = il_weights_show,
+};
+
+static int pid_il_weights_open(struct inode *inode, struct file *file)
+{
+	return proc_maps_open(inode, file, &il_weights_ops,
+			      sizeof(struct proc_maps_private));
+}
+
+static ssize_t il_weights_weight_write(struct file *file,
+				       const char __user *user_buf,
+				       size_t count, loff_t *ppos)
+{
+	struct task_struct *task;
+	char *buf, *buf_orig, *token, *sep;
+	unsigned char weight, *weights;
+	int node, *nodes;
+	int nr_weights = 0;
+	int ret = 0;
+
+	task = get_proc_task(file_inode(file));
+
+	buf = kmalloc(count + 1, GFP_KERNEL);
+	if (!buf) {
+		ret = -ENOMEM;
+		goto out_task;
+	}
+
+	nodes = kmalloc(sizeof(int)*MAX_NUMNODES, GFP_KERNEL);
+	if (!buf) {
+		ret = -ENOMEM;
+		goto out_buf;
+	}
+
+	weights = kmalloc(sizeof(unsigned int)*MAX_NUMNODES, GFP_KERNEL);
+	if (!buf) {
+		ret = -ENOMEM;
+		goto out_nodes;
+	}
+
+	if (copy_from_user(buf, user_buf, count)) {
+		ret = -EFAULT;
+		goto out_weights;
+	}
+	buf[count] = '\0';
+	buf_orig = buf;
+	buf = strim(buf);
+
+	while ((token = strsep(&buf, ",")) != NULL) {
+		size_t sep_pos = strcspn(token, ":");
+
+		if (token[sep_pos] != ':') {
+			ret = -EINVAL;
+			goto out_weights;
+		}
+
+		token[sep_pos] = '\0';
+		sep = token + sep_pos + 1;
+
+		/* A set node must have at least 1 allocation */
+		if (kstrtoint(token, 10, &node) ||
+			kstrtou8(sep, 10, &weight) ||
+			node >= MAX_NUMNODES ||
+			weight == 0) {
+			ret = -EINVAL;
+			goto out_weights;
+		}
+		nodes[nr_weights] = node;
+		weights[nr_weights] = weight;
+		nr_weights++;
+	}
+
+	/*
+	 * Now set the weights on the mempolicy, if the task's mempolicy has
+	 * meaningfully changes since we started, this will fail to avoid
+	 * race conditions.
+	 */
+	ret = mpol_set_interleave_weights(task, nodes, weights, nr_weights);
+	if (ret)
+		goto out_weights;
+
+	ret = count;
+out_weights:
+	kfree(weights);
+out_nodes:
+	kfree(nodes);
+out_buf:
+	kfree(buf);
+out_task:
+	put_task_struct(task);
+	return ret;
+}
+
+const struct file_operations proc_pid_il_weights_ops = {
+	.open    = pid_il_weights_open,
+	.read    = seq_read,
+	.llseek  = seq_lseek,
+	.release = proc_map_release,
+	.write   = il_weights_weight_write,
+};
+
 #endif /* CONFIG_NUMA */

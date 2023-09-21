@@ -197,9 +197,20 @@ static void mpol_relative_nodemask(nodemask_t *ret, const nodemask_t *orig,
 
 static int mpol_new_nodemask(struct mempolicy *pol, const nodemask_t *nodes)
 {
+	int next;
+
 	if (nodes_empty(*nodes))
 		return -EINVAL;
 	pol->nodes = *nodes;
+
+	/* For now, if the nodemask changes, reset the weights */
+	pol->interleave_weight = nodes_weight(pol->nodes);
+	next = first_node(pol->nodes);
+	while (next != MAX_NUMNODES) {
+		pol->weights[next] = 1;
+		next = next_node(next, pol->nodes);
+	}
+
 	return 0;
 }
 
@@ -300,6 +311,7 @@ static struct mempolicy *mpol_new(unsigned short mode, unsigned short flags,
 	policy->mode = mode;
 	policy->flags = flags;
 	policy->home_node = NUMA_NO_NODE;
+	memset(policy->weights, 0, sizeof(policy->weights));
 
 	return policy;
 }
@@ -882,13 +894,77 @@ static long do_set_mempolicy(unsigned short mode, unsigned short flags,
 
 	old = current->mempolicy;
 	current->mempolicy = new;
-	if (new && new->mode == MPOL_INTERLEAVE)
+	if (new && new->mode == MPOL_INTERLEAVE) {
 		current->il_prev = MAX_NUMNODES-1;
+		new->curweight = 1;
+	}
 	task_unlock(current);
 	mpol_put(old);
 	ret = 0;
 out:
 	NODEMASK_SCRATCH_FREE(scratch);
+	return ret;
+}
+
+/*
+ * This will do an atomic swap of the mempolicy with the node weights
+ * set to the new weights.  This atomicity is required because other
+ * operations may be occurring at the same time - such as a change of
+ * node mask or an active call to interleave some newly allocated memory,
+ * and this code can be called from other tasks.
+ */
+long mpol_set_interleave_weights(struct task_struct *task, int *nodes,
+				 unsigned char *weights, int count)
+{
+	struct mempolicy *new, *old;
+	unsigned char weight;
+	int node, i;
+	long ret = 0;
+
+	/* Validate all inputs before acquiring the task lock */
+	for (i = 0; i < count; i++) {
+		if (nodes[i] >= MAX_NUMNODES)
+			return -EINVAL;
+		if (weights[i] == 0)
+			return -EINVAL;
+	}
+
+	new = kmem_cache_alloc(policy_cache, GFP_KERNEL);
+	if (!new)
+		return -ENOMEM;
+
+	/*
+	 * Must hold task lock to avoid race with cpuset rebinds,
+	 * otherwise we could set a mempolicy that violates the
+	 * new cgroup bindings.
+	 */
+	task_lock(task);
+	old = get_task_policy(task);
+	if (old->mode != MPOL_INTERLEAVE) {
+		task_unlock(task);
+		return -EINVAL;
+	}
+
+	*new = *old;
+	atomic_set(&new->refcnt, 1);
+
+	/* Set new policy weights and recalculate the total weight */
+	for (i = 0; i < count; i++) {
+		node = nodes[i];
+		weight = weights[i];
+		if (!node_isset(node, new->nodes)) {
+			task_unlock(task);
+			mpol_put(new);
+			return -EINVAL;
+		}
+		new->interleave_weight -= new->weights[node];
+		new->interleave_weight += weight;
+		new->weights[node] = weight;
+	}
+
+	task->mempolicy = new;
+	task_unlock(task);
+	mpol_put(old);
 	return ret;
 }
 
@@ -1903,11 +1979,21 @@ static int policy_node(gfp_t gfp, struct mempolicy *policy, int nd)
 static unsigned interleave_nodes(struct mempolicy *policy)
 {
 	unsigned next;
+	unsigned char next_weight;
 	struct task_struct *me = current;
 
+	/* When weight reaches 0, we're on a new node, reset the weight */
 	next = next_node_in(me->il_prev, policy->nodes);
-	if (next < MAX_NUMNODES)
+	if (!policy->curweight) {
+		/* If the node is set, at least 1 allocation is required */
+		next_weight = policy->weights[next];
+		policy->curweight = next_weight ? next_weight : 1;
+	}
+
+	policy->curweight--;
+	if (next < MAX_NUMNODES && !policy->curweight)
 		me->il_prev = next;
+
 	return next;
 }
 
@@ -1967,7 +2053,7 @@ static unsigned offset_il_node(struct mempolicy *pol, unsigned long n)
 {
 	nodemask_t nodemask = pol->nodes;
 	unsigned int target, nnodes;
-	int i;
+	unsigned char weight;
 	int nid;
 	/*
 	 * The barrier will stabilize the nodemask in a register or on
@@ -1981,10 +2067,16 @@ static unsigned offset_il_node(struct mempolicy *pol, unsigned long n)
 	nnodes = nodes_weight(nodemask);
 	if (!nnodes)
 		return numa_node_id();
-	target = (unsigned int)n % nnodes;
+	target = (unsigned int)n % pol->interleave_weight;
 	nid = first_node(nodemask);
-	for (i = 0; i < target; i++)
+	while (target) {
+		/* fixme: concurrency issues, pol is not referenced */
+		weight = pol->weights[nid];
+		if (target < weight)
+			break;
+		target -= weight;
 		nid = next_node(nid, nodemask);
+	}
 	return nid;
 }
 
@@ -2314,6 +2406,88 @@ struct folio *folio_alloc(gfp_t gfp, unsigned order)
 }
 EXPORT_SYMBOL(folio_alloc);
 
+static unsigned long alloc_pages_bulk_array_weighted_interleave(gfp_t gfp,
+		struct mempolicy *pol, unsigned long nr_pages,
+		struct page **page_array)
+{
+	struct task_struct *me = current;
+	unsigned long total_allocated = 0;
+	unsigned long nr_allocated;
+	unsigned long rounds;
+	unsigned long node_pages, delta;
+	unsigned char weight;
+	int nnodes, node, prev_node;
+	int i;
+
+	nnodes = nodes_weight(pol->nodes);
+	/* Continue allocating from most recent node and adjust the nr_pages */
+	if (pol->curweight) {
+		node = next_node_in(me->il_prev, pol->nodes);
+		node_pages = pol->curweight;
+		nr_allocated = __alloc_pages_bulk(gfp,
+				node, NULL,
+				node_pages, NULL,
+				page_array);
+		page_array += nr_allocated;
+		total_allocated += nr_allocated;
+		/* if that's all the pages, no need to interleave */
+		if (nr_pages <= pol->curweight) {
+			pol->curweight -= nr_pages;
+			return total_allocated;
+		}
+		/* Otherwise we adjust nr_pages down, and continue from there */
+		nr_pages -= pol->curweight;
+		pol->curweight = 0;
+		prev_node = node;
+	}
+
+	/* Now we can continue allocating from this point */
+	rounds = nr_pages / pol->interleave_weight;
+	delta = nr_pages % pol->interleave_weight;
+	for (i = 0; i < nnodes; i++) {
+		node = next_node_in(prev_node, pol->nodes);
+		weight = pol->weights[node];
+		node_pages = weight * rounds;
+		if (delta) {
+			if (delta > weight) {
+				node_pages += weight;
+				delta -= weight;
+			} else {
+				node_pages += delta;
+				delta = 0;
+			}
+		}
+		/* We may not make it all the way around */
+		if (!node_pages)
+			break;
+		nr_allocated = __alloc_pages_bulk(gfp,
+				node, NULL,
+				node_pages, NULL,
+				page_array);
+		page_array += nr_allocated;
+		total_allocated += nr_allocated;
+		prev_node = node;
+	}
+
+	/*
+	 * Finally, we need to update me->il_prev and pol->curweight
+	 * if there were overflow pages, but not equivalent to the node
+	 * weight, set the curweight to node_weight - delta and the
+	 * me->il_prev to the previous node. Otherwise if it was perfect
+	 * we can simply set il_prev to node and curweight to 0
+	 */
+	delta %= weight;
+	if (node_pages) {
+		me->il_prev = prev_node;
+		pol->curweight = pol->weights[node]-node_pages;
+	} else {
+		me->il_prev = node;
+		pol->curweight = 0;
+	}
+
+	return total_allocated;
+}
+
 static unsigned long alloc_pages_bulk_array_interleave(gfp_t gfp,
 		struct mempolicy *pol, unsigned long nr_pages,
 		struct page **page_array)
@@ -2326,6 +2500,11 @@ static unsigned long alloc_pages_bulk_array_interleave(gfp_t gfp,
 	unsigned long total_allocated = 0;
 
 	nodes = nodes_weight(pol->nodes);
+
+	if (nodes != pol->interleave_weight)
+		return alloc_pages_bulk_array_weighted_interleave(gfp,
+			pol, nr_pages, page_array);
+
 	nr_pages_per_node = nr_pages / nodes;
 	delta = nr_pages - nodes * nr_pages_per_node;
 
