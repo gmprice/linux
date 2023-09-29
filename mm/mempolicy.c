@@ -195,11 +195,41 @@ static void mpol_relative_nodemask(nodemask_t *ret, const nodemask_t *orig,
 	nodes_onto(*ret, tmp, *rel);
 }
 
+static void mpol_recalculate_weights(struct mempolicy *pol)
+{
+	int node;
+
+	/* Recalculate weights to ensure a minimum */
+	for (node = 0; node < MAX_NUMNODES; node++) {
+		/* If node is not set, weight should be 0 */
+		if (!node_isset(node, pol->nodes)) {
+			pol->wil.il_weight -= pol->wil.weights[node];
+			pol->wil.weights[node] = 0;
+			continue;
+		}
+		/* If node is set, weight should be minimum of 1 */
+		if (!pol->wil.weights[node]) {
+			pol->wil.weights[node] = 1;
+			pol->wil.il_weight += 1;
+		}
+		/* Otherwise, keep the existing weight */
+	}
+	/*
+	 * It's possible an allocation has been occurring at this point
+	 * force it to go to the next node, since we just changed weights
+	 */
+	pol->wil.curweight = 0;
+}
+
 static int mpol_new_nodemask(struct mempolicy *pol, const nodemask_t *nodes)
 {
 	if (nodes_empty(*nodes))
 		return -EINVAL;
 	pol->nodes = *nodes;
+
+	if (pol->mode == MPOL_WEIGHTED_INTERLEAVE)
+		mpol_recalculate_weights(pol);
+
 	return 0;
 }
 
@@ -301,6 +331,10 @@ static struct mempolicy *mpol_new(unsigned short mode, unsigned short flags,
 	policy->flags = flags;
 	policy->home_node = NUMA_NO_NODE;
 
+	/* Weights will be initialized by mpol_set_nodemask, just clear them */
+	if (mode == MPOL_WEIGHTED_INTERLEAVE)
+		memset(policy->wil.weights, 0, sizeof(policy->wil.weights));
+
 	return policy;
 }
 
@@ -334,6 +368,10 @@ static void mpol_rebind_nodemask(struct mempolicy *pol, const nodemask_t *nodes)
 		tmp = *nodes;
 
 	pol->nodes = tmp;
+
+	/* After a change to the nodemask, weights must be recalculated */
+	if (pol->mode == MPOL_WEIGHTED_INTERLEAVE)
+		mpol_recalculate_weights(pol);
 }
 
 static void mpol_rebind_preferred(struct mempolicy *pol,
@@ -400,6 +438,10 @@ static const struct mempolicy_operations mpol_ops[MPOL_MAX] = {
 		.rebind = mpol_rebind_nodemask,
 	},
 	[MPOL_PARTIAL_INTERLEAVE] = {
+		.create = mpol_new_nodemask,
+		.rebind = mpol_rebind_nodemask,
+	},
+	[MPOL_WEIGHTED_INTERLEAVE] = {
 		.create = mpol_new_nodemask,
 		.rebind = mpol_rebind_nodemask,
 	},
@@ -880,8 +922,10 @@ static long swap_mempolicy(struct mempolicy *new,
 	old = current->mempolicy;
 	current->mempolicy = new;
 	if (new && (new->mode == MPOL_INTERLEAVE ||
-		    new->mode == MPOL_PARTIAL_INTERLEAVE))
+		    new->mode == MPOL_PARTIAL_INTERLEAVE ||
+		    new->mode == MPOL_WEIGHTED_INTERLEAVE))
 		current->il_prev = MAX_NUMNODES-1;
+
 out:
 	task_unlock(current);
 	if (old)
@@ -926,6 +970,7 @@ static void get_policy_nodemask(struct mempolicy *p, nodemask_t *nodes)
 	case MPOL_BIND:
 	case MPOL_INTERLEAVE:
 	case MPOL_PARTIAL_INTERLEAVE:
+	case MPOL_WEIGHTED_INTERLEAVE:
 	case MPOL_PREFERRED:
 	case MPOL_PREFERRED_MANY:
 		*nodes = p->nodes;
@@ -1637,6 +1682,55 @@ static long do_set_partial_interleave(struct mempolicy_args *args,
 	return 0;
 }
 
+static long do_set_weighted_interleave(struct mempolicy_args *args,
+				       struct mempolicy *new,
+				       nodemask_t *nodes)
+{
+	unsigned char weight;
+	unsigned char *weights;
+	int node;
+	int ret = 0;
+
+	/* Weighted interleave cannot be done with no nodemask */
+	if (nodes_empty(*nodes))
+		return -EINVAL;
+
+	/* Weighted interleave requires a valid number of weights */
+	if (!args->wil.weights)
+		return -EINVAL;
+
+	weights = kmalloc(MAX_NUMNODES, GFP_KERNEL);
+	if (!weights) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	ret = copy_from_user(weights, args->wil.weights, MAX_NUMNODES);
+	if (!ret)
+		goto weights_out;
+
+	/* Weights for set nodes cannot be 0 */
+	node = first_node(*nodes);
+	while (node != MAX_NUMNODES) {
+		weight = args->wil.weights[node];
+		if (!weight) {
+			ret = -EINVAL;
+			goto weights_out;
+		}
+		/* policy creation initializes total to nr_nodes, adjust it */
+		new->wil.il_weight -= new->wil.weights[node];
+		new->wil.il_weight += weight;
+		new->wil.weights[node] = weight;
+		next_node(node, *nodes);
+	}
+	new->wil.curweight = 0;
+
+weights_out:
+	kfree(weights);
+out:
+	return 0;
+}
+
 static long do_set_mempolicy2(struct mempolicy_args *args)
 {
 	struct mempolicy *new = NULL;
@@ -1662,6 +1756,9 @@ static long do_set_mempolicy2(struct mempolicy_args *args)
 	switch (args->mode) {
 	case MPOL_PARTIAL_INTERLEAVE:
 		err = do_set_partial_interleave(args, new, &nodes);
+		break;
+	case MPOL_WEIGHTED_INTERLEAVE:
+		err = do_set_weighted_interleave(args, new, &nodes);
 		break;
 	default:
 		BUG();
@@ -1821,6 +1918,12 @@ mode_info:
 		kargs->pil.next_node = next_node_in(current->il_prev,
 							 pol->nodes);
 		kargs->pil.interval = pol->pil.interval;
+		break;
+	case MPOL_WEIGHTED_INTERLEAVE:
+		kargs->wil.next_node = next_node_in(current->il_prev,
+						    pol->nodes);
+		err = copy_to_user(kargs->wil.weights, pol->wil.weights,
+				   MAX_NUMNODES);
 		break;
 	default:
 		break;
@@ -2170,6 +2273,8 @@ static unsigned partial_interleave_nodes(struct mempolicy *policy)
 	 */
 	if (!node_isset(mynode, policy->nodes))
 		mynode = first_node(policy->nodes);
+
+	next = next_node_in(me->il_prev, policy->nodes);
 	if (next == numa_node_id()) {
 		if (++policy->pil.count >= policy->pil.interval) {
 			policy->pil.count = 0;
@@ -2181,6 +2286,27 @@ static unsigned partial_interleave_nodes(struct mempolicy *policy)
 	return next;
 }
 
+static unsigned int weighted_interleave_nodes(struct mempolicy *policy)
+{
+	unsigned next;
+	unsigned char next_weight;
+	struct task_struct *me = current;
+
+	/* When weight reaches 0, we're on a new node, reset the weight */
+	next = next_node_in(me->il_prev, policy->nodes);
+	if (!policy->wil.curweight) {
+		/* If the node is set, at least 1 allocation is required */
+		next_weight = policy->wil.weights[next];
+		policy->wil.curweight = next_weight ? next_weight : 1;
+	}
+
+	policy->wil.curweight--;
+	if (next < MAX_NUMNODES && !policy->wil.curweight)
+		me->il_prev = next;
+
+	return next;
+}
+
 /* Do dynamic interleaving for a process */
 static unsigned interleave_nodes(struct mempolicy *policy)
 {
@@ -2189,6 +2315,8 @@ static unsigned interleave_nodes(struct mempolicy *policy)
 
 	if (policy->mode == MPOL_PARTIAL_INTERLEAVE)
 		return partial_interleave_nodes(policy);
+	else if (policy->mode == MPOL_WEIGHTED_INTERLEAVE)
+		return weighted_interleave_nodes(policy);
 
 	next = next_node_in(me->il_prev, policy->nodes);
 	if (next < MAX_NUMNODES)
@@ -2218,6 +2346,7 @@ unsigned int mempolicy_slab_node(void)
 
 	case MPOL_INTERLEAVE:
 	case MPOL_PARTIAL_INTERLEAVE:
+	case MPOL_WEIGHTED_INTERLEAVE:
 		return interleave_nodes(policy);
 
 	case MPOL_BIND:
@@ -2294,6 +2423,40 @@ static unsigned offset_pil_node(struct mempolicy *pol, unsigned long n)
 	return nid;
 }
 
+static unsigned offset_wil_node(struct mempolicy *pol, unsigned long n)
+{
+	nodemask_t nodemask = pol->nodes;
+	unsigned int target, nnodes;
+	unsigned char weight;
+	int nid;
+
+	/*
+	 * The barrier will stabilize the nodemask in a register or on
+	 * the stack so that it will stop changing under the code.
+	 *
+	 * Between first_node() and next_node(), pol->nodes could be changed
+	 * by other threads. So we put pol->nodes in a local stack.
+	 */
+	barrier();
+
+	nnodes = nodes_weight(nodemask);
+	if (!nnodes)
+		return numa_node_id();
+	target = (unsigned int)n % pol->wil.il_weight;
+	nid = first_node(nodemask);
+	while (target) {
+		weight = pol->wil.weights[nid];
+		/* If weights are being recaculated, revert to interleave */
+		if (!weight)
+			weight = 1;
+		if (target < weight)
+			break;
+		target -= weight;
+		nid = next_node_in(nid, nodemask);
+	}
+	return nid;
+}
+
 /*
  * Do static interleaving for a VMA with known offset @n.  Returns the n'th
  * node in pol->nodes (starting from n=0), wrapping around if n exceeds the
@@ -2308,6 +2471,8 @@ static unsigned offset_il_node(struct mempolicy *pol, unsigned long n)
 
 	if (pol->mode == MPOL_PARTIAL_INTERLEAVE)
 		return offset_pil_node(pol, n);
+	else if (pol->mode == MPOL_WEIGHTED_INTERLEAVE)
+		return offset_wil_node(pol, n);
 
 	nodemask = pol->nodes;
 
@@ -2379,7 +2544,8 @@ int huge_node(struct vm_area_struct *vma, unsigned long addr, gfp_t gfp_flags,
 	mode = (*mpol)->mode;
 
 	if (unlikely(mode == MPOL_INTERLEAVE) ||
-	    unlikely(mode == MPOL_PARTIAL_INTERLEAVE)) {
+	    unlikely(mode == MPOL_PARTIAL_INTERLEAVE) ||
+	    unlikely(mode == MPOL_WEIGHTED_INTERLEAVE)) {
 		nid = interleave_nid(*mpol, vma, addr,
 					huge_page_shift(hstate_vma(vma)));
 	} else {
@@ -2421,6 +2587,7 @@ bool init_nodemask_of_mempolicy(nodemask_t *mask)
 	case MPOL_BIND:
 	case MPOL_INTERLEAVE:
 	case MPOL_PARTIAL_INTERLEAVE:
+	case MPOL_WEIGHTED_INTERLEAVE:
 		*mask = mempolicy->nodes;
 		break;
 
@@ -2532,7 +2699,8 @@ struct folio *vma_alloc_folio(gfp_t gfp, int order, struct vm_area_struct *vma,
 	pol = get_vma_policy(vma, addr);
 
 	if (pol->mode == MPOL_INTERLEAVE ||
-	    pol->mode == MPOL_PARTIAL_INTERLEAVE) {
+	    pol->mode == MPOL_PARTIAL_INTERLEAVE ||
+	    pol->mode == MPOL_WEIGHTED_INTERLEAVE) {
 		struct page *page;
 		unsigned nid;
 
@@ -2635,7 +2803,8 @@ struct page *alloc_pages(gfp_t gfp, unsigned order)
 	 * nor system default_policy
 	 */
 	if (pol->mode == MPOL_INTERLEAVE ||
-	    pol->mode == MPOL_PARTIAL_INTERLEAVE)
+	    pol->mode == MPOL_PARTIAL_INTERLEAVE ||
+	    pol->mode == MPOL_WEIGHTED_INTERLEAVE)
 		page = alloc_page_interleave(gfp, order, interleave_nodes(pol));
 	else if (pol->mode == MPOL_PREFERRED_MANY)
 		page = alloc_pages_preferred_many(gfp, order,
@@ -2757,6 +2926,88 @@ static unsigned long alloc_pages_bulk_array_partial_interleave(gfp_t gfp,
 	return allocated;
 }
 
+static unsigned long alloc_pages_bulk_array_weighted_interleave(gfp_t gfp,
+	struct mempolicy *pol, unsigned long nr_pages,
+	struct page **page_array)
+{
+	struct task_struct *me = current;
+	unsigned long total_allocated = 0;
+	unsigned long nr_allocated;
+	unsigned long rounds;
+	unsigned long node_pages, delta;
+	unsigned char weight;
+	int nnodes, node, prev_node;
+	int i;
+
+	nnodes = nodes_weight(pol->nodes);
+	/* Continue allocating from most recent node and adjust the nr_pages */
+	if (pol->wil.curweight) {
+	       node = next_node_in(me->il_prev, pol->nodes);
+	       node_pages = pol->wil.curweight;
+	       nr_allocated = __alloc_pages_bulk(gfp,
+			       node, NULL,
+			       node_pages, NULL,
+			       page_array);
+	       page_array += nr_allocated;
+	       total_allocated += nr_allocated;
+	       /* if that's all the pages, no need to interleave */
+	       if (nr_pages <= pol->wil.curweight) {
+		       pol->wil.curweight -= nr_pages;
+		       return total_allocated;
+	       }
+	       /* Otherwise we adjust nr_pages down, and continue from there */
+	       nr_pages -= pol->wil.curweight;
+	       pol->wil.curweight = 0;
+	       prev_node = node;
+	}
+
+	/* Now we can continue allocating from this point */
+	rounds = nr_pages / pol->wil.il_weight;
+	delta = nr_pages % pol->wil.il_weight;
+	for (i = 0; i < nnodes; i++) {
+	       node = next_node_in(prev_node, pol->nodes);
+	       weight = pol->wil.weights[node];
+	       node_pages = weight * rounds;
+	       if (delta) {
+		       if (delta > weight) {
+			       node_pages += weight;
+			       delta -= weight;
+		       } else {
+			       node_pages += delta;
+			       delta = 0;
+		       }
+	       }
+	       /* We may not make it all the way around */
+	       if (!node_pages)
+		       break;
+	       nr_allocated = __alloc_pages_bulk(gfp,
+			       node, NULL,
+			       node_pages, NULL,
+			       page_array);
+	       page_array += nr_allocated;
+	       total_allocated += nr_allocated;
+	       prev_node = node;
+	}
+
+	/*
+	* Finally, we need to update me->il_prev and pol->wil.curweight
+	* if there were overflow pages, but not equivalent to the node
+	* weight, set the curweight to node_weight - delta and the
+	* me->il_prev to the previous node. Otherwise if it was perfect
+	* we can simply set il_prev to node and curweight to 0
+	*/
+	delta %= weight;
+	if (node_pages) {
+	       me->il_prev = prev_node;
+	       pol->wil.curweight = pol->wil.weights[node] - node_pages;
+	} else {
+	       me->il_prev = node;
+	       pol->wil.curweight = 0;
+	}
+
+	return total_allocated;
+}
+
 static unsigned long alloc_pages_bulk_array_preferred_many(gfp_t gfp, int nid,
 		struct mempolicy *pol, unsigned long nr_pages,
 		struct page **page_array)
@@ -2799,6 +3050,11 @@ unsigned long alloc_pages_bulk_array_mempolicy(gfp_t gfp,
 		return alloc_pages_bulk_array_partial_interleave(gfp, pol,
 								 nr_pages,
 								 page_array);
+
+	if (pol->mode == MPOL_WEIGHTED_INTERLEAVE)
+		return alloc_pages_bulk_array_weighted_interleave(gfp, pol,
+								  nr_pages,
+								  page_array);
 
 	if (pol->mode == MPOL_PREFERRED_MANY)
 		return alloc_pages_bulk_array_preferred_many(gfp,
@@ -2873,6 +3129,7 @@ bool __mpol_equal(struct mempolicy *a, struct mempolicy *b)
 	case MPOL_BIND:
 	case MPOL_INTERLEAVE:
 	case MPOL_PARTIAL_INTERLEAVE:
+	case MPOL_WEIGHTED_INTERLEAVE:
 	case MPOL_PREFERRED:
 	case MPOL_PREFERRED_MANY:
 		return !!nodes_equal(a->nodes, b->nodes);
@@ -3010,6 +3267,7 @@ int mpol_misplaced(struct page *page, struct vm_area_struct *vma, unsigned long 
 	switch (pol->mode) {
 	case MPOL_INTERLEAVE:
 	case MPOL_PARTIAL_INTERLEAVE:
+	case MPOL_WEIGHTED_INTERLEAVE:
 		pgoff = vma->vm_pgoff;
 		pgoff += (addr - vma->vm_start) >> PAGE_SHIFT;
 		polnid = offset_il_node(pol, pgoff);
@@ -3398,6 +3656,7 @@ static const char * const policy_modes[] =
 	[MPOL_BIND]       = "bind",
 	[MPOL_INTERLEAVE] = "interleave",
 	[MPOL_PARTIAL_INTERLEAVE] = "partial interleave",
+	[MPOL_WEIGHTED_INTERLEAVE] = "weighted interleave",
 	[MPOL_LOCAL]      = "local",
 	[MPOL_PREFERRED_MANY]  = "prefer (many)",
 };
@@ -3569,6 +3828,7 @@ void mpol_to_str(char *buffer, int maxlen, struct mempolicy *pol)
 	case MPOL_BIND:
 	case MPOL_INTERLEAVE:
 	case MPOL_PARTIAL_INTERLEAVE:
+	case MPOL_WEIGHTED_INTERLEAVE:
 		nodes = pol->nodes;
 		break;
 	default:

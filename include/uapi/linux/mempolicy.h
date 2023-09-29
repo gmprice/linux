@@ -25,6 +25,7 @@ enum {
 	MPOL_PREFERRED_MANY,
 	MPOL_LEGACY,	/* set_mempolicy limited to above modes */
 	MPOL_PARTIAL_INTERLEAVE,
+	MPOL_WEIGHTED_INTERLEAVE,
 	MPOL_MAX,	/* always last member of enum */
 };
 
@@ -61,6 +62,11 @@ struct mempolicy_args {
 			unsigned long interval;  /* get and set */
 			unsigned long next_node; /* get only */
 		} pil;
+		/* Weighted interleave */
+		struct {
+			unsigned long next_node; /* get only */
+			unsigned char *weights; /* get and set */
+		} wil;
 	};
 };
 

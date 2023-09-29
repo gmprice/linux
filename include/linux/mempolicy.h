@@ -54,6 +54,12 @@ struct mempolicy {
 			int interval;
 			int count;
 		} pil;
+		/* weighted interleave */
+		struct {
+			unsigned int il_weight;
+			unsigned char curweight;
+			unsigned char weights[MAX_NUMNODES];
+		} wil;
 	};
 
 	union {
