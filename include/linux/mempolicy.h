@@ -60,6 +60,7 @@ struct mempolicy {
 			unsigned char cur_weight;
 			unsigned char weights[MAX_NUMNODES];
 		} wil;
+		/* bandwidth tiering (no values currently) */
 	};
 
 	union {

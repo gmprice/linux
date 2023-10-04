@@ -23,6 +23,7 @@ enum {
 	MPOL_INTERLEAVE,
 	MPOL_LOCAL,
 	MPOL_PREFERRED_MANY,
+	MPOL_BANDWIDTH_TIERING,
 	MPOL_LEGACY,	/* set_mempolicy limited to above modes */
 	MPOL_PREFERRED_INTERLEAVE,
 	MPOL_WEIGHTED_INTERLEAVE,
@@ -64,6 +65,9 @@ struct mempolicy_args {
 			unsigned long next_node; /* get only */
 			unsigned char *weights; /* get and set */
 		} wil;
+		struct {
+			unsigned long next_node; /* get only */
+		} bwt;
 	};
 };
 
