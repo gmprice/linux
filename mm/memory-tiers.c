@@ -14,6 +14,11 @@ struct memory_tier {
 	/* list of all memory types part of this tier */
 	struct list_head memory_types;
 	/*
+	 * By default all tiers will have weight as 1, which means they
+	 * follow default standard allocation.
+	 */
+	unsigned char interleave_weight[MAX_NUMNODES];
+	/*
 	 * start value of abstract distance. memory tier maps
 	 * an abstract distance  range,
 	 * adistance_start .. adistance_start + MEMTIER_CHUNK_SIZE
@@ -145,8 +150,68 @@ static ssize_t nodelist_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(nodelist);
 
+static ssize_t interleave_weight_show(struct device *dev,
+				      struct device_attribute *attr,
+				      char *buf)
+{
+	int ret = 0;
+	struct memory_tier *tier = to_memory_tier(dev);
+	int node;
+	int count = 0;
+
+	mutex_lock(&memory_tier_lock);
+	for_each_online_node(node) {
+		if (count > 0)
+			ret += sysfs_emit_at(buf, ret, ",");
+		ret += sysfs_emit_at(buf, ret, "%d:%d", node, tier->interleave_weight[node]);
+		count++;
+	}
+	mutex_unlock(&memory_tier_lock);
+	sysfs_emit_at(buf, ret++, "\n");
+
+	return ret;
+}
+
+static ssize_t interleave_weight_store(struct device *dev,
+				       struct device_attribute *attr,
+				       const char *buf, size_t size)
+{
+	unsigned char weight;
+	int from_node;
+	char *delim;
+	int ret;
+	struct memory_tier *tier = to_memory_tier(dev);
+
+	delim = strchr(buf, ':');
+	if (!delim)
+		return -EINVAL;
+	delim[0] = '\0';
+
+	ret = kstrtou32(buf, 10, &from_node);
+	if (ret)
+		return ret;
+
+	if (from_node >= MAX_NUMNODES || !node_online(from_node))
+		return -EINVAL;
+
+	ret = kstrtou8(delim+1, 0, &weight);
+	if (ret)
+		return ret;
+
+	if (weight > MAX_TIER_INTERLEAVE_WEIGHT)
+		return -EINVAL;
+
+	mutex_lock(&memory_tier_lock);
+	tier->interleave_weight[from_node] = weight;
+	mutex_unlock(&memory_tier_lock);
+
+	return size;
+}
+static DEVICE_ATTR_RW(interleave_weight);
+
 static struct attribute *memtier_dev_attrs[] = {
 	&dev_attr_nodelist.attr,
+	&dev_attr_interleave_weight.attr,
 	NULL
 };
 
@@ -236,6 +301,35 @@ static struct memory_tier *__node_get_memory_tier(int node)
 	 */
 	return rcu_dereference_check(pgdat->memtier,
 				     lockdep_is_held(&memory_tier_lock));
+}
+
+unsigned char memtier_get_node_weight(int from_node, int target_node)
+{
+	struct memory_tier *tier = __node_get_memory_tier(target_node);
+
+	if (!tier)
+		return 1;
+
+	return tier->interleave_weight[from_node];
+};
+
+unsigned int memtier_get_total_weight(int from_node, nodemask_t *nodes)
+{
+	unsigned int weight = 0;
+	struct memory_tier *tier;
+	unsigned int min = nodes_weight(*nodes);
+	int node;
+
+	node = first_node(*nodes);
+	while (node < MAX_NUMNODES) {
+		tier = __node_get_memory_tier(node);
+		if (!tier)
+			weight += 1;
+		else
+			weight += tier->interleave_weight[from_node];
+		node = next_node(node, *nodes);
+	}
+	return weight >= min ? weight : min;
 }
 
 #ifdef CONFIG_MIGRATION
@@ -489,8 +583,11 @@ static struct memory_tier *set_node_memory_tier(int node)
 	memtype = node_memory_types[node].memtype;
 	node_set(node, memtype->nodes);
 	memtier = find_create_memory_tier(memtype);
-	if (!IS_ERR(memtier))
+	if (!IS_ERR(memtier)) {
 		rcu_assign_pointer(pgdat->memtier, memtier);
+		memset(memtier->interleave_weight, 1,
+		       sizeof(memtier->interleave_weight));
+	}
 	return memtier;
 }
 
