@@ -8,11 +8,23 @@
 
 #include "internal.h"
 
+struct mt_accessor {
+	struct kobject kobj;
+	unsigned char interleave_weight;
+};
+
 struct memory_tier {
 	/* hierarchy of memory tiers */
 	struct list_head list;
 	/* list of all memory types part of this tier */
 	struct list_head memory_types;
+	/*
+	 * By default all tiers will have weight as 1, which means they
+	 * follow default standard allocation.
+	 */
+	struct mt_accessor *accessors[MAX_NUMNODES];
+	nodemask_t accessor_mask;
+
 	/*
 	 * start value of abstract distance. memory tier maps
 	 * an abstract distance  range,
@@ -121,6 +133,13 @@ static __always_inline nodemask_t get_memtier_nodemask(struct memory_tier *memti
 	return nodes;
 }
 
+static void mt_acc_release(struct kobject *kobj)
+{
+	struct mt_accessor *acc = container_of(kobj, struct mt_accessor, kobj);
+
+	kfree(acc);
+}
+
 static void memory_tier_device_release(struct device *dev)
 {
 	struct memory_tier *tier = to_memory_tier(dev);
@@ -145,9 +164,53 @@ static ssize_t nodelist_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(nodelist);
 
+static ssize_t interleave_weight_show(struct kobject *kobj,
+				      struct kobj_attribute *attr,
+				      char *buf)
+{
+	struct mt_accessor *acc = container_of(kobj, struct mt_accessor, kobj);
+
+	return sysfs_emit(buf, "%d\n", acc->interleave_weight);
+}
+
+static ssize_t interleave_weight_store(struct kobject *kobj,
+				       struct kobj_attribute *attr,
+				       const char *buf, size_t size)
+{
+	struct mt_accessor *acc = container_of(kobj, struct mt_accessor, kobj);
+	unsigned char weight;
+	int ret;
+
+	ret = kstrtou8(buf, 0, &weight);
+	if (ret)
+		return ret;
+
+	if (!weight || weight > MAX_TIER_INTERLEAVE_WEIGHT)
+		return -EINVAL;
+
+	if (acc)
+		acc->interleave_weight = weight;
+	return size;
+}
+static struct kobj_attribute interleave_weight = __ATTR_RW(interleave_weight);
+
+static struct attribute *mtacc_attrs[] = {
+	&interleave_weight.attr,
+	NULL
+};
+
+static const struct attribute_group mtacc_group = {
+	.attrs = mtacc_attrs,
+};
+
 static struct attribute *memtier_dev_attrs[] = {
 	&dev_attr_nodelist.attr,
 	NULL
+};
+
+static const struct kobj_type mt_acc_ktype = {
+	.sysfs_ops = &kobj_sysfs_ops,
+	.release = mt_acc_release,
 };
 
 static const struct attribute_group memtier_dev_group = {
@@ -162,8 +225,10 @@ static const struct attribute_group *memtier_dev_groups[] = {
 static struct memory_tier *find_create_memory_tier(struct memory_dev_type *memtype)
 {
 	int ret;
+	int node;
 	bool found_slot = false;
 	struct memory_tier *memtier, *new_memtier;
+	struct mt_accessor *acc;
 	int adistance = memtype->adistance;
 	unsigned int memtier_adistance_chunk_size = MEMTIER_CHUNK_SIZE;
 
@@ -215,6 +280,34 @@ static struct memory_tier *find_create_memory_tier(struct memory_dev_type *memty
 		put_device(&new_memtier->dev);
 		return ERR_PTR(ret);
 	}
+
+	/* Add accessor devices for each cpu node */
+	for_each_node_state(node, N_CPU) {
+		char name[20];
+
+		acc = kzalloc(sizeof(struct mt_accessor), GFP_KERNEL);
+		if (!acc)
+			break;
+		snprintf(name, sizeof(name), "access%d", node);
+		acc->interleave_weight = 1;
+		ret = kobject_init_and_add(&acc->kobj, &mt_acc_ktype,
+					   &new_memtier->dev.kobj, name);
+		if (ret) {
+			kfree(acc);
+			break;
+		}
+		ret = sysfs_create_group(&acc->kobj, &mtacc_group);
+		if (ret) {
+			kobject_put(&acc->kobj);
+			kfree(acc);
+			break;
+		}
+		new_memtier->accessors[node] = acc;
+		node_set(node, new_memtier->accessor_mask);
+	}
+	if (ret)
+		pr_warn("unable to create accessors for memory_tier\n");
+
 	memtier = new_memtier;
 
 link_memtype:
@@ -236,6 +329,65 @@ static struct memory_tier *__node_get_memory_tier(int node)
 	 */
 	return rcu_dereference_check(pgdat->memtier,
 				     lockdep_is_held(&memory_tier_lock));
+}
+
+unsigned char memtier_get_node_weight(int from_node, int target_node,
+				      nodemask_t *pol_nodes)
+{
+	struct memory_tier *tier;
+	struct mt_accessor *acc;
+	unsigned char tier_weight, node_weight = 1;
+	int tier_nodes;
+	nodemask_t tier_nmask, tier_and_pol;
+
+	rcu_read_lock();
+	tier = __node_get_memory_tier(target_node);
+	if (!tier)
+		goto unlock;
+
+	acc = tier->accessors[from_node];
+	if (!acc)
+		goto unlock;
+
+	tier_nmask = get_memtier_nodemask(tier);
+	nodes_and(tier_and_pol, tier_nmask, *pol_nodes);
+	tier_nodes = nodes_weight(tier_and_pol);
+	tier_weight = acc->interleave_weight;
+	node_weight = tier_weight / tier_nodes;
+	node_weight += (tier_weight % tier_nodes) ? 1 : 0;
+unlock:
+	rcu_read_unlock();
+	return node_weight;
+}
+
+unsigned int memtier_get_total_weight(int from_node, nodemask_t *pol_nodes)
+{
+	unsigned int weight = 0;
+	struct memory_tier *tier;
+	unsigned int min = nodes_weight(*pol_nodes);
+	int node;
+	nodemask_t tier_nmask, tier_and_pol;
+	int tier_nodes;
+	unsigned int tier_weight;
+
+	rcu_read_lock();
+	for_each_node_mask(node, *pol_nodes) {
+		tier = __node_get_memory_tier(node);
+		if (!tier || !tier->accessors[from_node]) {
+			weight += 1;
+			continue;
+		}
+		tier_nmask = get_memtier_nodemask(tier);
+		nodes_and(tier_and_pol, tier_nmask, *pol_nodes);
+		tier_nodes = nodes_weight(tier_and_pol);
+		/* divide node weight by number of nodes, take ceil */
+		tier_weight = tier->accessors[from_node]->interleave_weight;
+		weight += tier_weight / tier_nodes;
+		weight += (tier_weight % tier_nodes) ? 1 : 0;
+	}
+	rcu_read_unlock();
+
+	return weight >= min ? weight : min;
 }
 
 #ifdef CONFIG_MIGRATION
@@ -496,7 +648,18 @@ static struct memory_tier *set_node_memory_tier(int node)
 
 static void destroy_memory_tier(struct memory_tier *memtier)
 {
+	int node;
 	list_del(&memtier->list);
+
+	for_each_node_mask(node, memtier->accessor_mask) {
+		struct mt_accessor *acc = memtier->accessors[node];
+
+		if (!acc)
+			continue;
+		sysfs_remove_group(&acc->kobj, &mtacc_group);
+		kobject_put(&acc->kobj);
+		memtier->accessors[node] = NULL;
+	}
 	device_unregister(&memtier->dev);
 }
 
