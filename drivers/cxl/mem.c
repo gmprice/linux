@@ -104,6 +104,123 @@ static int cxl_debugfs_poison_clear(void *data, u64 dpa)
 DEFINE_DEBUGFS_ATTRIBUTE(cxl_poison_clear_fops, NULL,
 			 cxl_debugfs_poison_clear, "%llx\n");
 
+struct qos_class_ctx {
+	bool matched;
+	int dev_qos_class;
+};
+
+static int match_cxlrd_qos_class(struct device *dev, void *data)
+{
+	struct qos_class_ctx *ctx = data;
+	struct cxl_root_decoder *cxlrd;
+
+	if (!is_root_decoder(dev))
+		return 0;
+
+	cxlrd = to_cxl_root_decoder(dev);
+	if (cxlrd->qos_class == CXL_QOS_CLASS_INVALID ||
+	    ctx->dev_qos_class == CXL_QOS_CLASS_INVALID)
+		return 0;
+
+	if (cxlrd->qos_class == ctx->dev_qos_class) {
+		ctx->matched = 1;
+		return 1;
+	}
+
+	return 0;
+}
+
+struct qos_hb_ctx {
+	bool matched;
+	struct device *host_bridge;
+};
+
+static int match_cxlrd_hb(struct device *dev, void *data)
+{
+	struct cxl_switch_decoder *cxlsd;
+	struct qos_hb_ctx *ctx = data;
+	struct cxl_root_decoder *cxlrd;
+	unsigned int seq;
+
+	if (!is_root_decoder(dev))
+		return 0;
+
+	cxlrd = to_cxl_root_decoder(dev);
+	cxlsd = &cxlrd->cxlsd;
+
+	do {
+		seq = read_seqbegin(&cxlsd->target_lock);
+		for (int i = 0; i < cxlsd->nr_targets; i++) {
+			if (ctx->host_bridge ==
+			    cxlsd->target[i]->dport_dev) {
+				ctx->matched = true;
+				return 1;
+			}
+		}
+	} while (read_seqretry(&cxlsd->target_lock, seq));
+
+	return 0;
+}
+
+static int cxl_qos_class_verify(struct cxl_memdev *cxlmd)
+{
+	struct cxl_dev_state *cxlds = cxlmd->cxlds;
+	struct cxl_memdev_state *mds = to_cxl_memdev_state(cxlds);
+	struct qos_class_ctx ctx;
+	struct qos_hb_ctx hbctx;
+	struct cxl_port *root_port;
+	int rc;
+
+	root_port = find_cxl_root(cxlmd->endpoint);
+	if (!root_port)
+		return -ENODEV;
+
+	/* Check that the QTG IDs are all sane between end device and root decoders */
+	if (mds->ram_qos_class != CXL_QOS_CLASS_INVALID) {
+		ctx = (struct qos_class_ctx) {
+			.matched = false,
+			.dev_qos_class =  mds->ram_qos_class,
+		};
+		rc = device_for_each_child(&root_port->dev, &ctx, match_cxlrd_qos_class);
+		if (rc < 0)
+			goto out;
+
+		if (!ctx.matched)
+			mds->ram_qos_class = CXL_QOS_CLASS_INVALID;
+	}
+
+	if (mds->pmem_qos_class != CXL_QOS_CLASS_INVALID) {
+		ctx = (struct qos_class_ctx) {
+			.matched = false,
+			.dev_qos_class =  mds->pmem_qos_class,
+		};
+		rc = device_for_each_child(&root_port->dev, &ctx, match_cxlrd_qos_class);
+		if (rc < 0)
+			goto out;
+
+		if (!ctx.matched)
+			mds->pmem_qos_class = CXL_QOS_CLASS_INVALID;
+	}
+
+	/* Check to make sure that the device's host bridge is under a root decoder */
+	hbctx = (struct qos_hb_ctx) {
+		.matched = false,
+		.host_bridge = cxlmd->endpoint->host_bridge,
+	};
+	rc = device_for_each_child(&root_port->dev, &hbctx, match_cxlrd_hb);
+	if (rc < 0)
+		goto out;
+
+	if (!hbctx.matched) {
+		mds->ram_qos_class = CXL_QOS_CLASS_INVALID;
+		mds->pmem_qos_class = CXL_QOS_CLASS_INVALID;
+	}
+
+out:
+	put_device(&root_port->dev);
+	return rc;
+}
+
 static int cxl_mem_probe(struct device *dev)
 {
 	struct cxl_memdev *cxlmd = to_cxl_memdev(dev);
@@ -171,6 +288,10 @@ unlock:
 	device_unlock(endpoint_parent);
 	put_device(&parent_port->dev);
 	if (rc)
+		return rc;
+
+	rc = cxl_qos_class_verify(cxlmd);
+	if (rc < 0)
 		return rc;
 
 	if (resource_size(&cxlds->pmem_res) && IS_ENABLED(CONFIG_CXL_PMEM)) {
