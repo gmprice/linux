@@ -60,6 +60,7 @@ struct target_cache {
 enum {
 	NODE_ACCESS_CLASS_0 = 0,
 	NODE_ACCESS_CLASS_1,
+	NODE_ACCESS_CLASS_GENPORT_SINK,
 	NODE_ACCESS_CLASS_MAX,
 };
 
@@ -336,6 +337,10 @@ static __init void hmat_update_target(unsigned int tgt_pxm, unsigned int init_px
 		if (node_state(pxm_to_node(init_pxm), N_CPU))
 			hmat_update_target_access(target, type, value,
 						  NODE_ACCESS_CLASS_1);
+		/* Update access from generic port target */
+		if (*target->gen_port_device_handle)
+			hmat_update_target_access(target, type, value,
+						  NODE_ACCESS_CLASS_GENPORT_SINK);
 	}
 }
 
