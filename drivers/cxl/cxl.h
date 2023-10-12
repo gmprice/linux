@@ -630,6 +630,7 @@ struct cxl_rcrb_info {
  * @rcrb: Data about the Root Complex Register Block layout
  * @rch: Indicate whether this dport was enumerated in RCH or VH mode
  * @port: reference to cxl_port that contains this downstream port
+ * @coord: access coordinates (performance) for switch from CDAT
  */
 struct cxl_dport {
 	struct device *dport_dev;
@@ -638,6 +639,7 @@ struct cxl_dport {
 	struct cxl_rcrb_info rcrb;
 	bool rch;
 	struct cxl_port *port;
+	struct access_coordinate coord;
 };
 
 /**
@@ -837,6 +839,7 @@ struct dsmas_entry {
 #ifdef CONFIG_FIRMWARE_TABLE
 int cxl_cdat_endpoint_process(struct cxl_port *port, struct list_head *list);
 void cxl_cdat_dsmas_list_destroy(struct list_head *dsmas_list);
+int cxl_cdat_switch_process(struct cxl_port *port);
 #else
 static inline int cxl_cdat_endpoint_process(struct cxl_port *port,
 					    struct list_head *list)
@@ -846,6 +849,11 @@ static inline int cxl_cdat_endpoint_process(struct cxl_port *port,
 
 static inline void cxl_cdat_dsmas_list_destroy(struct list_head *dsmas_list)
 {
+}
+
+static inline int cxl_cdat_switch_process(struct cxl_port *port)
+{
+	return -EOPNOTSUPP;
 }
 #endif
 
