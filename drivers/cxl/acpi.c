@@ -513,8 +513,21 @@ static int cxl_get_chbs(struct device *dev, struct acpi_device *hb,
 	return 0;
 }
 
+static int get_genport_coordinates(struct device *dev, struct cxl_dport *dport)
+{
+	struct acpi_device *hb = to_cxl_host_bridge(NULL, dev);
+	u8 handle[ACPI_SRAT_DEVICE_HANDLE_SIZE] = { 0 };
+
+	/* ACPI spec 6.5 table 5.65 */
+	strncpy(handle, acpi_device_hid(hb), 8);
+	strncpy(&handle[8], acpi_device_uid(hb), 4);
+
+	return acpi_get_genport_coordinates(handle, &dport->hb_access);
+}
+
 static int add_host_bridge_dport(struct device *match, void *arg)
 {
+	int ret;
 	acpi_status rc;
 	struct device *bridge;
 	struct cxl_dport *dport;
@@ -563,6 +576,10 @@ static int add_host_bridge_dport(struct device *match, void *arg)
 
 	if (IS_ERR(dport))
 		return PTR_ERR(dport);
+
+	ret = get_genport_coordinates(match, dport);
+	if (ret)
+		dev_dbg(match, "Failed to get generic port perf coordinates.\n");
 
 	return 0;
 }
