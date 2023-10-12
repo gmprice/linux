@@ -888,6 +888,9 @@ static inline int cxl_cdat_switch_process(struct cxl_port *port)
 }
 #endif
 
+int cxl_endpoint_get_perf_coordinates(struct cxl_port *port,
+				      struct access_coordinate *coord);
+
 /*
  * Unit test builds overrides this to __weak, find the 'strong' version
  * of these symbols in tools/testing/cxl/.
