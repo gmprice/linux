@@ -105,6 +105,49 @@ static int cxl_port_perf_data_calculate(struct cxl_port *port,
 	return 0;
 }
 
+static void cxl_memdev_set_qos_class(struct cxl_dev_state *cxlds,
+				     struct list_head *dsmas_list)
+{
+	struct cxl_memdev_state *mds = to_cxl_memdev_state(cxlds);
+	struct range pmem_range = {
+		.start = cxlds->pmem_res.start,
+		.end = cxlds->pmem_res.end,
+	};
+	struct range ram_range = {
+		.start = cxlds->ram_res.start,
+		.end = cxlds->ram_res.end,
+	};
+	struct perf_prop_entry *perf;
+	struct dsmas_entry *dent;
+
+	list_for_each_entry(dent, dsmas_list, list) {
+		perf = devm_kzalloc(cxlds->dev, sizeof(*perf), GFP_KERNEL);
+		if (!perf)
+			return;
+
+		perf->dpa_range = dent->dpa_range;
+		perf->coord = dent->coord;
+		perf->qos_class = dent->qos_class;
+		list_add_tail(&perf->list, &mds->perf_list);
+
+		if (resource_size(&cxlds->ram_res) &&
+		    range_contains(&ram_range, &dent->dpa_range)) {
+			if (mds->ram_qos_class == CXL_QOS_CLASS_INVALID)
+				mds->ram_qos_class = perf->qos_class;
+			else
+				dev_dbg(cxlds->dev,
+					"Multiple DSMAS entries for ram region.\n");
+		} else if (resource_size(&cxlds->pmem_res) &&
+			 range_contains(&pmem_range, &dent->dpa_range)) {
+			if (mds->pmem_qos_class == CXL_QOS_CLASS_INVALID)
+				mds->pmem_qos_class = perf->qos_class;
+			else
+				dev_dbg(cxlds->dev,
+					"Multiple DSMAS entries for pmem region.\n");
+		}
+	}
+}
+
 static int cxl_switch_port_probe(struct cxl_port *port)
 {
 	struct cxl_hdm *cxlhdm;
@@ -196,17 +239,22 @@ static int cxl_endpoint_port_probe(struct cxl_port *port)
 		rc = cxl_cdat_endpoint_process(port, &dsmas_list);
 		if (rc < 0) {
 			dev_dbg(&port->dev, "Failed to parse CDAT: %d\n", rc);
-		} else {
-			rc = cxl_port_perf_data_calculate(port, &dsmas_list);
-			if (rc)
-				dev_dbg(&port->dev,
-					"Failed to do perf coord calculations.\n");
+			goto out;
 		}
 
+		rc = cxl_port_perf_data_calculate(port, &dsmas_list);
+		if (rc) {
+			dev_dbg(&port->dev,
+				"Failed to do perf coord calculations.\n");
+			goto out;
+		}
+
+		cxl_memdev_set_qos_class(cxlds, &dsmas_list);
+out:
 		cxl_cdat_dsmas_list_destroy(&dsmas_list);
 	}
 
-	return 0;
+	return rc;
 }
 
 static int cxl_port_probe(struct device *dev)
