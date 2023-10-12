@@ -859,12 +859,16 @@ static inline struct cxl_dax_region *to_cxl_dax_region(struct device *dev)
 }
 #endif
 
+
 /* CDAT related bits */
 struct dsmas_entry {
 	struct list_head list;
 	struct range dpa_range;
 	u8 handle;
 	struct access_coordinate coord;
+
+	int entries;
+	int qos_class;
 };
 
 #ifdef CONFIG_FIRMWARE_TABLE
