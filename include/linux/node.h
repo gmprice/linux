@@ -26,12 +26,14 @@
  * @write_bandwidth:	Write bandwidth in MB/s
  * @read_latency:	Read latency in nanoseconds
  * @write_latency:	Write latency in nanoseconds
+ * @il_weight:		Interleave weight in # of pages (1-100)
  */
 struct node_hmem_attrs {
 	unsigned int read_bandwidth;
 	unsigned int write_bandwidth;
 	unsigned int read_latency;
 	unsigned int write_latency;
+	unsigned char il_weight;
 };
 
 enum cache_indexing {
@@ -138,6 +140,12 @@ extern void unregister_memory_block_under_nodes(struct memory_block *mem_blk);
 extern int register_memory_node_under_compute_node(unsigned int mem_nid,
 						   unsigned int cpu_nid,
 						   unsigned access);
+
+extern unsigned char node_get_il_weight(unsigned int nid,
+					unsigned int access_nid);
+extern unsigned int nodes_get_il_weights(unsigned int access_nid,
+					 nodemask_t *nodes,
+					 unsigned char *weights);
 #else
 static inline void node_dev_init(void)
 {
@@ -164,6 +172,17 @@ static inline int unregister_cpu_under_node(unsigned int cpu, unsigned int nid)
 }
 static inline void unregister_memory_block_under_nodes(struct memory_block *mem_blk)
 {
+}
+static inline unsigned char node_get_il_weight(unsigned int nid,
+					       unsigned int access_nid)
+{
+	return 0;
+}
+static inline unsigned int nodes_get_il_weights(unsigned int access_nid,
+						nodemask_t *nodes,
+						unsigned char *weights)
+{
+	return 0;
 }
 #endif
 
