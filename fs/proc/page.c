@@ -111,6 +111,7 @@ u64 stable_page_flags(struct page *page)
 {
 	u64 k;
 	u64 u;
+	struct folio *folio;
 
 	/*
 	 * pseudo flag: KPF_NOPAGE
@@ -118,6 +119,8 @@ u64 stable_page_flags(struct page *page)
 	 */
 	if (!page)
 		return 1 << KPF_NOPAGE;
+
+	folio = page_folio(page);
 
 	k = page->flags;
 	u = 0;
@@ -188,20 +191,31 @@ u64 stable_page_flags(struct page *page)
 		u |= 1 << KPF_SLAB;
 
 	u |= kpf_copy_bit(k, KPF_ERROR,		PG_error);
-	u |= kpf_copy_bit(k, KPF_DIRTY,		PG_dirty);
+
+	if (folio_test_dirty(folio))
+		u |= 1 << KPF_DIRTY;
+
 	u |= kpf_copy_bit(k, KPF_UPTODATE,	PG_uptodate);
 	u |= kpf_copy_bit(k, KPF_WRITEBACK,	PG_writeback);
 
-	u |= kpf_copy_bit(k, KPF_LRU,		PG_lru);
-	u |= kpf_copy_bit(k, KPF_REFERENCED,	PG_referenced);
-	u |= kpf_copy_bit(k, KPF_ACTIVE,	PG_active);
+	if (folio_test_lru(folio))
+		u |= 1 << KPF_LRU;
+
+	if (folio_test_referenced(folio))
+		u |= 1 << KPF_REFERENCED;
+
+	if (folio_test_active(folio))
+		u |= 1 << KPF_ACTIVE;
+
 	u |= kpf_copy_bit(k, KPF_RECLAIM,	PG_reclaim);
 
 	if (PageSwapCache(page))
 		u |= 1 << KPF_SWAPCACHE;
 	u |= kpf_copy_bit(k, KPF_SWAPBACKED,	PG_swapbacked);
 
-	u |= kpf_copy_bit(k, KPF_UNEVICTABLE,	PG_unevictable);
+	if (folio_test_unevictable(folio))
+		u |= 1 << KPF_UNEVICTABLE;
+
 	u |= kpf_copy_bit(k, KPF_MLOCKED,	PG_mlocked);
 
 #ifdef CONFIG_MEMORY_FAILURE
