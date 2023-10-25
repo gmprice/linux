@@ -176,11 +176,86 @@ ACCESS_ATTR(read_latency);
 ACCESS_ATTR(write_bandwidth);
 ACCESS_ATTR(write_latency);
 
+#define MAX_NODE_INTERLEAVE_WEIGHT 100
+static ssize_t il_weight_show(struct device *dev,
+			      struct device_attribute *attr,
+			      char *buf)
+{
+	return sysfs_emit(buf, "%u\n",
+			  to_access_nodes(dev)->hmem_attrs.il_weight);
+}
+
+static ssize_t il_weight_store(struct device *dev,
+			       struct device_attribute *attr,
+			       const char *buf, size_t len)
+{
+	unsigned char weight;
+	int ret;
+
+	ret = kstrtou8(buf, 0, &weight);
+	if (ret)
+		return ret;
+
+	if (!weight || weight > MAX_NODE_INTERLEAVE_WEIGHT)
+		return -EINVAL;
+
+	to_access_nodes(dev)->hmem_attrs.il_weight = weight;
+	return len;
+}
+DEVICE_ATTR_RW(il_weight);
+
+unsigned char node_get_il_weight(unsigned int nid, unsigned int access_nid)
+{
+	struct node *node;
+	struct node_access_nodes *c;
+	unsigned char weight = 0;
+
+	node = node_devices[nid];
+	if (!node)
+		return 1;
+
+	list_for_each_entry(c, &node->access_list, list_node) {
+		if (!c || c->access != access_nid)
+			continue;
+		weight = c->hmem_attrs.il_weight;
+		break;
+	}
+	return weight ? weight : 1;
+}
+
+unsigned int nodes_get_il_weights(unsigned int access_nid, nodemask_t *nodes,
+				  unsigned char* weights)
+{
+	unsigned int nid;
+	struct node *node;
+	struct node_access_nodes *c;
+	unsigned int ttl_weight = 0;
+	unsigned char weight = 0;
+
+	for_each_node_mask(nid, *nodes) {
+		weight = 0;
+		node = node_devices[nid];
+		if (!node)
+			goto next_node;
+		list_for_each_entry(c, &node->access_list, list_node) {
+			if (!c || c->access != access_nid)
+				continue;
+			weight = c->hmem_attrs.il_weight;
+			break;
+		}
+next_node:
+		weights[nid] = weight ? weight : 1;
+		ttl_weight += weight ? weight : 1;
+	}
+	return ttl_weight;
+}
+
 static struct attribute *access_attrs[] = {
 	&dev_attr_read_bandwidth.attr,
 	&dev_attr_read_latency.attr,
 	&dev_attr_write_bandwidth.attr,
 	&dev_attr_write_latency.attr,
+	&dev_attr_il_weight.attr,
 	NULL,
 };
 
@@ -206,6 +281,11 @@ void node_set_perf_attrs(unsigned int nid, struct node_hmem_attrs *hmem_attrs,
 		return;
 
 	c->hmem_attrs = *hmem_attrs;
+
+	/* Enforce minimum interleave weight of 1 page */
+	if (!c->hmem_attrs.il_weight)
+		c->hmem_attrs.il_weight = 1;
+
 	for (i = 0; access_attrs[i] != NULL; i++) {
 		if (sysfs_add_file_to_group(&c->dev.kobj, access_attrs[i],
 					    "initiators")) {
@@ -363,6 +443,21 @@ static void node_init_caches(unsigned int nid)
 #else
 static void node_init_caches(unsigned int nid) { }
 static void node_remove_caches(struct node *node) { }
+
+unsigned char node_get_il_weight(unsigned int nid, unsigned int access_nid)
+{
+	return 1;
+}
+
+unsigned int nodes_get_il_weights(unsigned int access_nid, nodemask_t *nodes,
+				  unsigned char* weights)
+{
+	unsigned int nid;
+
+	for_each_node_mask(nid, *nodes)
+		weights[nid] = 1;
+	return nodes_weight(nodes);
+}
 #endif
 
 #define K(x) ((x) << (PAGE_SHIFT - 10))
