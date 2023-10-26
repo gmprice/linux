@@ -182,7 +182,7 @@ static ssize_t il_weight_show(struct device *dev,
 			      char *buf)
 {
 	return sysfs_emit(buf, "%u\n",
-			  to_access_nodes(dev)->hmem_attrs.il_weight);
+			  to_access_nodes(dev)->coord.il_weight);
 }
 
 static ssize_t il_weight_store(struct device *dev,
@@ -199,7 +199,7 @@ static ssize_t il_weight_store(struct device *dev,
 	if (!weight || weight > MAX_NODE_INTERLEAVE_WEIGHT)
 		return -EINVAL;
 
-	to_access_nodes(dev)->hmem_attrs.il_weight = weight;
+	to_access_nodes(dev)->coord.il_weight = weight;
 	return len;
 }
 DEVICE_ATTR_RW(il_weight);
@@ -217,7 +217,7 @@ unsigned char node_get_il_weight(unsigned int nid, unsigned int access_nid)
 	list_for_each_entry(c, &node->access_list, list_node) {
 		if (!c || c->access != access_nid)
 			continue;
-		weight = c->hmem_attrs.il_weight;
+		weight = c->coord.il_weight;
 		break;
 	}
 	return weight ? weight : 1;
@@ -240,7 +240,7 @@ unsigned int nodes_get_il_weights(unsigned int access_nid, nodemask_t *nodes,
 		list_for_each_entry(c, &node->access_list, list_node) {
 			if (!c || c->access != access_nid)
 				continue;
-			weight = c->hmem_attrs.il_weight;
+			weight = c->coord.il_weight;
 			break;
 		}
 next_node:
