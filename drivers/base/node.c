@@ -868,7 +868,9 @@ int __register_one_node(int nid)
 {
 	int error;
 	int cpu;
+	int onid;
 	struct node *node;
+	struct node_access_nodes *acc;
 
 	node = kzalloc(sizeof(struct node), GFP_KERNEL);
 	if (!node)
@@ -886,6 +888,20 @@ int __register_one_node(int nid)
 	}
 
 	node_init_caches(nid);
+
+	/*
+	 * for each cpu node - add accessor to this node
+	 * if this is a cpu node, add accessor to each other node
+	 */
+	for_each_online_node(onid) {
+		/* During system bringup nodes may not be fully initialized */
+		if (!node_devices[onid])
+			continue;
+		if (node_state(onid, N_CPU))
+			acc = node_init_node_access(node, onid);
+		if (node_state(nid, N_CPU))
+			acc = node_init_node_access(node_devices[onid], nid);
+	}
 
 	return error;
 }
