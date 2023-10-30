@@ -83,8 +83,83 @@ struct node_access_nodes {
 #ifdef CONFIG_HMEM_REPORTING
 	struct node_hmem_attrs	hmem_attrs;
 #endif
+	unsigned char il_weight;
 };
 #define to_access_nodes(dev) container_of(dev, struct node_access_nodes, dev)
+
+#define MAX_NODE_INTERLEAVE_WEIGHT 100
+static ssize_t il_weight_show(struct device *dev,
+			      struct device_attribute *attr,
+			      char *buf)
+{
+	return sysfs_emit(buf, "%u\n",
+			  to_access_nodes(dev)->il_weight);
+}
+
+static ssize_t il_weight_store(struct device *dev,
+			       struct device_attribute *attr,
+			       const char *buf, size_t len)
+{
+	unsigned char weight;
+	int ret;
+
+	ret = kstrtou8(buf, 0, &weight);
+	if (ret)
+		return ret;
+
+	if (!weight || weight > MAX_NODE_INTERLEAVE_WEIGHT)
+		return -EINVAL;
+
+	to_access_nodes(dev)->il_weight = weight;
+	return len;
+}
+DEVICE_ATTR_RW(il_weight);
+
+unsigned char node_get_il_weight(unsigned int nid, unsigned int access_nid)
+{
+	struct node *node;
+	struct node_access_nodes *c;
+	unsigned char weight = 1;
+
+	node = node_devices[nid];
+	if (!node)
+		return weight;
+
+	list_for_each_entry(c, &node->access_list, list_node) {
+		if (c->access != access_nid)
+			continue;
+		weight = c->il_weight;
+		break;
+	}
+	return weight;
+}
+
+unsigned int nodes_get_il_weights(unsigned int access_nid, nodemask_t *nodes,
+				  unsigned char *weights)
+{
+	unsigned int nid;
+	struct node *node;
+	struct node_access_nodes *c;
+	unsigned int ttl_weight = 0;
+	unsigned char weight = 1;
+
+	for_each_node_mask(nid, *nodes) {
+		weight = 1;
+		node = node_devices[nid];
+		if (!node)
+			goto next_node;
+		list_for_each_entry(c, &node->access_list, list_node) {
+			if (c->access != access_nid)
+				continue;
+			weight = c->il_weight;
+			break;
+		}
+next_node:
+		weights[nid] = weight;
+		ttl_weight += weight;
+	}
+	return ttl_weight;
+}
 
 static struct attribute *node_init_access_node_attrs[] = {
 	NULL,
@@ -116,6 +191,7 @@ static void node_remove_accesses(struct node *node)
 
 	list_for_each_entry_safe(c, cnext, &node->access_list, list_node) {
 		list_del(&c->list_node);
+		device_remove_file(&c->dev, &dev_attr_il_weight);
 		device_unregister(&c->dev);
 	}
 }
@@ -140,6 +216,7 @@ static struct node_access_nodes *node_init_node_access(struct node *node,
 		return NULL;
 
 	access_node->access = access;
+	access_node->il_weight = 1;
 	dev = &access_node->dev;
 	dev->parent = &node->dev;
 	dev->release = node_access_release;
@@ -149,6 +226,9 @@ static struct node_access_nodes *node_init_node_access(struct node *node,
 
 	if (device_register(dev))
 		goto free_name;
+
+	if (device_create_file(dev, &dev_attr_il_weight))
+		dev_warn(dev, "failed to add il_weight attribute\n");
 
 	pm_runtime_no_callbacks(dev);
 	list_add_tail(&access_node->list_node, &node->access_list);
@@ -363,6 +443,21 @@ static void node_init_caches(unsigned int nid)
 #else
 static void node_init_caches(unsigned int nid) { }
 static void node_remove_caches(struct node *node) { }
+
+unsigned char node_get_il_weight(unsigned int nid, unsigned int access_nid)
+{
+	return 1;
+}
+
+unsigned int nodes_get_il_weights(unsigned int access_nid, nodemask_t *nodes,
+				  unsigned char *weights)
+{
+	unsigned int nid;
+
+	for_each_node_mask(nid, *nodes)
+		weights[nid] = 1;
+	return nodes_weight(nodes);
+}
 #endif
 
 #define K(x) ((x) << (PAGE_SHIFT - 10))
