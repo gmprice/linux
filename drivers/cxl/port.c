@@ -252,6 +252,7 @@ static int cxl_endpoint_port_probe(struct cxl_port *port)
 		cxl_memdev_set_qos_class(cxlds, &dsmas_list);
 out:
 		cxl_cdat_dsmas_list_destroy(&dsmas_list);
+		rc = 0;
 	}
 
 	return rc;
