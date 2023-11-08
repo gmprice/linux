@@ -332,6 +332,30 @@ MPOL_F_RELATIVE_NODES
 	MPOL_PREFERRED policies that were created with an empty nodemask
 	(local allocation).
 
+MPOL_F_IL_WEIGHTING
+	This flag changes the behavior of MPOL_INTERLEAVE from round-robin
+	allocation to using weights defined in the task's cgroup. When not
+	set, MPOL_INTERLEAVE defaults to round-robin allocation.
+
+	Node weights can be set via the sysfs interface as follows:
+
+	echo 0:3 > /sys/fs/cgroup/.../memory.interleave_weights
+	echo 1:1 > /sys/fs/cgroup/.../memory.interleave_weights
+
+	This sets a 3:1 ratio (75%:25%) between node 0 and node 1 for
+	this cgroup.  When a task in this cgroup utilizes MPOL_INTERLEAVE
+	with MPOL_F_IL_WEIGHTING, the interleave logic will change from
+	round-robin to applying the ratios set by the cgroup.
+
+	Node weights can be cleared and the parent cgroup's settings
+	re-inherited as follows:
+
+	echo -1:0 > /sys/fs/cgroup/.../memory.interleave_weights
+
+	MPOL_F_IL_WEIGHTING can only be set with MPOL_INTERLEAVE.
+
+	See `Documentation/admin-guide/cgroup-v2.rst` for details.
+
 Memory Policy Reference Counting
 ================================
 
