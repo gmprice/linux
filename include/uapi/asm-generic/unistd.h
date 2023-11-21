@@ -828,9 +828,15 @@ __SYSCALL(__NR_futex_wake, sys_futex_wake)
 __SYSCALL(__NR_futex_wait, sys_futex_wait)
 #define __NR_futex_requeue 456
 __SYSCALL(__NR_futex_requeue, sys_futex_requeue)
+#define __NR_set_task_mempolicy 457
+__SYSCALL(__NR_set_task_mempolicy, sys_set_task_mempolicy)
+#define __NR_get_task_mempolicy 458
+__SYSCALL(__NR_get_task_mempolicy, sys_get_task_mempolicy)
+#define __NR_set_task_mempolicy_home_node 459
+__SYSCALL(__NR_set_task_mempolicy_home_node, sys_set_task_mempolicy_home_node)
 
 #undef __NR_syscalls
-#define __NR_syscalls 457
+#define __NR_syscalls 460
 
 /*
  * 32 bit systems traditionally used different
