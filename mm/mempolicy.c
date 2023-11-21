@@ -1610,6 +1610,27 @@ SYSCALL_DEFINE3(set_mempolicy, int, mode, const unsigned long __user *, nmask,
 	return kernel_set_mempolicy(current, mode, nmask, maxnode);
 }
 
+SYSCALL_DEFINE4(process_set_mempolicy, int, pidfd, int, mode,
+		const unsigned long __user *, nmask, unsigned long, maxnode)
+{
+	struct task_struct *task;
+	unsigned int f_flags;
+	int err;
+
+	if (!capable(CAP_SYS_NICE) ||
+	    !ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS))
+		return -EPERM;
+
+	task = pidfd_get_task(pidfd, &f_flags);
+	if (IS_ERR(task))
+		return PTR_ERR(task);
+
+	err = kernel_set_mempolicy(task, mode, nmask, maxnode);
+
+	put_task_struct(task);
+	return err;
+}
+
 static int kernel_migrate_pages(pid_t pid, unsigned long maxnode,
 				const unsigned long __user *old_nodes,
 				const unsigned long __user *new_nodes)
@@ -1742,6 +1763,36 @@ SYSCALL_DEFINE5(get_mempolicy, int __user *, policy,
 {
 	return kernel_get_mempolicy(current, current->mm, policy, nmask,
 				    maxnode, addr, flags);
+}
+
+SYSCALL_DEFINE6(process_get_mempolicy, int, pidfd, int __user *, policy,
+		unsigned long __user *, nmask, unsigned long, maxnode,
+		unsigned long, addr, unsigned long, flags)
+{
+	struct task_struct *task;
+	struct mm_struct *mm;
+	unsigned int f_flags;
+	int err;
+
+	if (!capable(CAP_SYS_NICE))
+		return -EPERM;
+
+	task = pidfd_get_task(pidfd, &f_flags);
+	if (IS_ERR(task))
+		return PTR_ERR(task);
+
+	/* Require PTRACE_MODE_READ to avoid leaking ASLR metadata */
+	mm = mm_access(task, PTRACE_MODE_READ_FSCREDS);
+	if (IS_ERR_OR_NULL(mm)) {
+		err = IS_ERR(mm) ? PTR_ERR(mm) : -ESRCH;
+		goto release_task;
+	}
+
+	err = kernel_get_mempolicy(task, mm, policy, nmask, maxnode, addr, flags);
+	mmput(mm);
+release_task:
+	put_task_struct(task);
+	return err;
 }
 
 bool vma_migratable(struct vm_area_struct *vma)
