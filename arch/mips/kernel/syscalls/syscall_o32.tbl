@@ -444,3 +444,7 @@
 454	o32	futex_wake			sys_futex_wake
 455	o32	futex_wait			sys_futex_wait
 456	o32	futex_requeue			sys_futex_requeue
+457	n32	process_set_mempolicy		sys_process_set_mempolicy
+458	n32	process_get_mempolicy		sys_process_get_mempolicy
+459	n32	process_set_mempolicy_home_node	sys_process_set_mempolicy_home_node
+460	n32	process_mbind			sys_process_mbind

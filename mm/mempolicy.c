@@ -1602,11 +1602,144 @@ SYSCALL_DEFINE4(set_mempolicy_home_node, unsigned long, start, unsigned long, le
 					 home_node, flags);
 }
 
+SYSCALL_DEFINE5(process_set_mempolicy_home_node, int, pidfd,
+		const struct iovec __user *, vec, size_t, vlen,
+		unsigned long, home_node, unsigned long, flags)
+{
+	struct task_struct *task;
+	struct mm_struct *mm;
+	unsigned int f_flags;
+	struct iovec iovstack[UIO_FASTIOV];
+	struct iovec *iov = iovstack;
+	struct iov_iter iter;
+	int err;
+
+	if (!capable(CAP_SYS_NICE) ||
+	    !ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS))
+		return -EPERM;
+
+	err = import_iovec(ITER_DEST, vec, vlen, ARRAY_SIZE(iovstack), &iov,
+			   &iter);
+	if (err)
+		return err;
+
+	task = pidfd_get_task(pidfd, &f_flags);
+	if (IS_ERR(task)) {
+		err = PTR_ERR(task);
+		goto free_iov;
+	}
+
+	/* Require PTRACE_MODE_READ to avoid leaking ASLR metadata */
+	mm = mm_access(task, PTRACE_MODE_READ_FSCREDS);
+	if (IS_ERR_OR_NULL(mm)) {
+		err = IS_ERR(mm) ? PTR_ERR(mm) : -ESRCH;
+		goto release_task;
+	}
+
+	while (iov_iter_count(&iter)) {
+		unsigned long start, len;
+
+		start = untagged_addr((unsigned long)iter_iov_addr(&iter));
+		len = iter_iov_len(&iter);
+		err = __set_mempolicy_home_node(task, mm, start, len, home_node,
+						flags);
+		if (err)
+			break;
+		iov_iter_advance(&iter, iter_iov_len(&iter));
+	}
+
+	mmput(mm);
+release_task:
+	put_task_struct(task);
+free_iov:
+	kfree(iov);
+	return err;
+}
+
 SYSCALL_DEFINE6(mbind, unsigned long, start, unsigned long, len,
 		unsigned long, mode, const unsigned long __user *, nmask,
 		unsigned long, maxnode, unsigned int, flags)
 {
 	return kernel_mbind(start, len, mode, nmask, maxnode, flags);
+}
+
+static long kernel_process_mbind(const struct proc_mbind_args __user *uargs,
+				 size_t usize)
+{
+	struct proc_mbind_args kargs;
+	struct task_struct *task;
+	struct mm_struct *mm;
+	struct iovec iovstack[UIO_FASTIOV];
+	struct iovec *iov = iovstack;
+	struct iov_iter iter;
+	unsigned int f_flags;
+	unsigned short mode_flags;
+	int lmode;
+	nodemask_t nodes;
+	int err;
+
+	/* Gate on CAP_SYS_NICE because we may migrate data */
+	if (!capable(CAP_SYS_NICE))
+		return -EPERM;
+
+	if (usize < sizeof(kargs))
+		return -EINVAL;
+
+	err = copy_struct_from_user(&kargs, sizeof(kargs), uargs, usize);
+	if (err)
+		return err;
+
+	mode_flags = kargs.flags;
+	err = sanitize_mpol_flags(&lmode, &mode_flags);
+	if (err)
+		return err;
+
+	err = get_nodes(&nodes, kargs.nmask, kargs.maxnode);
+	if (err)
+		return err;
+
+	err = import_iovec(ITER_DEST, kargs.vec, kargs.vlen,
+			   ARRAY_SIZE(iovstack), &iov, &iter);
+	if (err)
+		return err;
+
+	task = pidfd_get_task(kargs.pidfd, &f_flags);
+	if (IS_ERR(task)) {
+		err = PTR_ERR(task);
+		goto free_iov;
+	}
+
+	/* Require PTRACE_MODE_READ to avoid leaking ASLR metadata */
+	mm = mm_access(task, PTRACE_MODE_READ_FSCREDS);
+	if (IS_ERR_OR_NULL(mm)) {
+		err = IS_ERR(mm) ? PTR_ERR(mm) : -ESRCH;
+		goto release_task;
+	}
+
+	while (iov_iter_count(&iter)) {
+		unsigned long start, len;
+
+		start = untagged_addr((unsigned long)iter_iov_addr(&iter));
+		len = iter_iov_len(&iter);
+		err = do_mbind(task, mm, start, len, lmode, mode_flags, &nodes,
+			       kargs.flags);
+		if (err)
+			break;
+		iov_iter_advance(&iter, iter_iov_len(&iter));
+	}
+
+	mmput(mm);
+release_task:
+	put_task_struct(task);
+free_iov:
+	kfree(iov);
+	return err;
+}
+
+SYSCALL_DEFINE2(process_mbind, const struct proc_mbind_args __user *, args,
+		size_t, size)
+{
+	return kernel_process_mbind(args, size);
 }
 
 /* Set the process memory policy */
@@ -1634,6 +1767,27 @@ SYSCALL_DEFINE3(set_mempolicy, int, mode, const unsigned long __user *, nmask,
 		unsigned long, maxnode)
 {
 	return kernel_set_mempolicy(current, mode, nmask, maxnode);
+}
+
+SYSCALL_DEFINE4(process_set_mempolicy, int, pidfd, int, mode,
+		const unsigned long __user *, nmask, unsigned long, maxnode)
+{
+	struct task_struct *task;
+	unsigned int f_flags;
+	int err;
+
+	if (!capable(CAP_SYS_NICE) ||
+	    !ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS))
+		return -EPERM;
+
+	task = pidfd_get_task(pidfd, &f_flags);
+	if (IS_ERR(task))
+		return PTR_ERR(task);
+
+	err = kernel_set_mempolicy(task, mode, nmask, maxnode);
+
+	put_task_struct(task);
+	return err;
 }
 
 static int kernel_migrate_pages(pid_t pid, unsigned long maxnode,
@@ -1768,6 +1922,36 @@ SYSCALL_DEFINE5(get_mempolicy, int __user *, policy,
 {
 	return kernel_get_mempolicy(current, current->mm, policy, nmask,
 				    maxnode, addr, flags);
+}
+
+SYSCALL_DEFINE6(process_get_mempolicy, int, pidfd, int __user *, policy,
+		unsigned long __user *, nmask, unsigned long, maxnode,
+		unsigned long, addr, unsigned long, flags)
+{
+	struct task_struct *task;
+	struct mm_struct *mm;
+	unsigned int f_flags;
+	int err;
+
+	if (!capable(CAP_SYS_NICE))
+		return -EPERM;
+
+	task = pidfd_get_task(pidfd, &f_flags);
+	if (IS_ERR(task))
+		return PTR_ERR(task);
+
+	/* Require PTRACE_MODE_READ to avoid leaking ASLR metadata */
+	mm = mm_access(task, PTRACE_MODE_READ_FSCREDS);
+	if (IS_ERR_OR_NULL(mm)) {
+		err = IS_ERR(mm) ? PTR_ERR(mm) : -ESRCH;
+		goto release_task;
+	}
+
+	err = kernel_get_mempolicy(task, mm, policy, nmask, maxnode, addr, flags);
+	mmput(mm);
+release_task:
+	put_task_struct(task);
+	return err;
 }
 
 bool vma_migratable(struct vm_area_struct *vma)
