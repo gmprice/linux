@@ -1509,10 +1509,13 @@ static long kernel_mbind(unsigned long start, unsigned long len,
 	return do_mbind(start, len, lmode, mode_flags, &nodes, flags);
 }
 
-SYSCALL_DEFINE4(set_mempolicy_home_node, unsigned long, start, unsigned long, len,
-		unsigned long, home_node, unsigned long, flags)
+static long __set_mempolicy_home_node(struct task_struct *task,
+				      struct mm_struct *mm,
+				      unsigned long start,
+				      unsigned long len,
+				      unsigned long home_node,
+				      unsigned long flags)
 {
-	struct mm_struct *mm = current->mm;
 	struct vm_area_struct *vma, *prev;
 	struct mempolicy *new, *old;
 	unsigned long end;
@@ -1574,6 +1577,13 @@ SYSCALL_DEFINE4(set_mempolicy_home_node, unsigned long, start, unsigned long, le
 	}
 	mmap_write_unlock(mm);
 	return err;
+}
+
+SYSCALL_DEFINE4(set_mempolicy_home_node, unsigned long, start, unsigned long, len,
+		unsigned long, home_node, unsigned long, flags)
+{
+	return __set_mempolicy_home_node(current, current->mm, start, len,
+					 home_node, flags);
 }
 
 SYSCALL_DEFINE6(mbind, unsigned long, start, unsigned long, len,
