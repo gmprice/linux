@@ -2005,6 +2005,8 @@ static struct mempolicy *get_task_vma_policy(struct task_struct *task,
 {
 	struct mempolicy *pol;
 
+	lockdep_assert_held(&task->alloc_lock);
+
 	pol = __get_vma_policy(vma, addr, ilx);
 	if (!pol)
 		pol = get_task_policy(task);
