@@ -537,7 +537,7 @@ struct page *read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 
 	task_lock(current);
 	mpol = get_vma_policy(vma, addr, 0, &ilx);
-	mpol_get(pol);
+	mpol_get(mpol);
 	task_unlock(current);
 	page = __read_swap_cache_async(entry, gfp_mask, mpol, ilx,
 					&page_allocated);
