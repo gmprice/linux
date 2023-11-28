@@ -91,6 +91,16 @@ static inline struct mempolicy *mpol_dup(struct mempolicy *pol)
 	return pol;
 }
 
+extern struct mempolicy *__mpol_dup_task(struct task_struct *task,
+					 struct mempolicy *pol);
+static inline struct mempolicy *mpol_dup_task(struct task_struct *task,
+					      struct mempolicy *pol)
+{
+	if (pol)
+		pol = __mpol_dup_task(task, pol);
+	return pol;
+}
+
 static inline void mpol_get(struct mempolicy *pol)
 {
 	if (pol)
