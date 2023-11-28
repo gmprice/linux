@@ -1581,7 +1581,7 @@ static long __set_mempolicy_home_node(struct task_struct *task,
 			err = -EOPNOTSUPP;
 			break;
 		}
-		new = mpol_dup(old);
+		new = mpol_dup_task(task, old);
 		if (IS_ERR(new)) {
 			err = PTR_ERR(new);
 			break;
@@ -2596,8 +2596,9 @@ int vma_dup_policy(struct vm_area_struct *src, struct vm_area_struct *dst)
  * cpuset's mems), so we needn't do rebind work for current task.
  */
 
-/* Slow path of a mempolicy duplicate */
-struct mempolicy *__mpol_dup(struct mempolicy *old)
+/* Task variant of __mpol_dup, checks given task for mems_allowed rebind */
+struct mempolicy *__mpol_dup_task(struct task_struct *task,
+				  struct mempolicy *old)
 {
 	struct mempolicy *new = kmem_cache_alloc(policy_cache, GFP_KERNEL);
 
@@ -2612,12 +2613,18 @@ struct mempolicy *__mpol_dup(struct mempolicy *old)
 	} else
 		*new = *old;
 
-	if (current_cpuset_is_being_rebound()) {
-		nodemask_t mems = cpuset_mems_allowed(current);
+	if (task_cpuset_is_being_rebound(task)) {
+		nodemask_t mems = cpuset_mems_allowed(task);
 		mpol_rebind_policy(new, &mems);
 	}
 	atomic_set(&new->refcnt, 1);
 	return new;
+}
+
+/* Slow path of a mempolicy duplicate */
+struct mempolicy *__mpol_dup(struct mempolicy *old)
+{
+	return __mpol_dup_task(current, old);
 }
 
 /* Slow path of a mempolicy comparison */
