@@ -126,6 +126,7 @@ static inline int cpuset_do_slab_mem_spread(void)
 }
 
 extern bool current_cpuset_is_being_rebound(void);
+extern bool task_cpuset_is_being_rebound(struct task_struct *task);
 
 extern void rebuild_sched_domains(void);
 
