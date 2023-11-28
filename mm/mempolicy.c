@@ -420,8 +420,9 @@ static const struct mempolicy_operations mpol_ops[MPOL_MAX] = {
 
 static bool migrate_folio_add(struct folio *folio, struct list_head *foliolist,
 				unsigned long flags);
-static nodemask_t *policy_nodemask(gfp_t gfp, struct mempolicy *pol,
-				pgoff_t ilx, int *nid);
+static nodemask_t *policy_nodemask(struct task_struct *task, gfp_t gfp,
+				   struct mempolicy *pol, pgoff_t ilx,
+				   int *nid);
 static struct mempolicy *get_task_vma_policy(struct task_struct *task,
 					     struct vm_area_struct *vma,
 					     unsigned long addr, int order,
@@ -438,6 +439,7 @@ static bool strictly_unmovable(unsigned long flags)
 }
 
 struct migration_mpol {		/* for alloc_migration_target_by_mpol() */
+	struct task_struct *task;
 	struct mempolicy *pol;
 	pgoff_t ilx;
 };
@@ -1209,7 +1211,7 @@ static struct folio *alloc_migration_target_by_mpol(struct folio *src,
 
 		h = folio_hstate(src);
 		gfp = htlb_alloc_mask(h);
-		nodemask = policy_nodemask(gfp, pol, ilx, &nid);
+		nodemask = policy_nodemask(mmpol->task, gfp, pol, ilx, &nid);
 		return alloc_hugetlb_folio_nodemask(h, nid, nodemask, gfp);
 	}
 
@@ -1336,6 +1338,7 @@ static long do_mbind(struct task_struct *task, struct mm_struct *mm,
 			mpol_get(new);
 			task_unlock(task);
 		}
+		mmpol.task = task;
 		mmpol.pol = new;
 		mmpol.ilx = 0;
 
@@ -2175,8 +2178,9 @@ static unsigned int interleave_nid(struct mempolicy *pol, pgoff_t ilx)
  * Return a nodemask representing a mempolicy for filtering nodes for
  * page allocation, together with preferred node id (or the input node id).
  */
-static nodemask_t *policy_nodemask(gfp_t gfp, struct mempolicy *pol,
-				   pgoff_t ilx, int *nid)
+static nodemask_t *policy_nodemask(struct task_struct *task, gfp_t gfp,
+				   struct mempolicy *pol, pgoff_t ilx,
+				   int *nid)
 {
 	nodemask_t *nodemask = NULL;
 
@@ -2192,9 +2196,15 @@ static nodemask_t *policy_nodemask(gfp_t gfp, struct mempolicy *pol,
 		break;
 	case MPOL_BIND:
 		/* Restrict to nodemask (but not on lower zones) */
-		if (apply_policy_zone(pol, gfp_zone(gfp)) &&
-		    cpuset_nodemask_valid_mems_allowed(&pol->nodes))
-			nodemask = &pol->nodes;
+		if (apply_policy_zone(pol, gfp_zone(gfp))) {
+			int intersects;
+			task_lock(task);
+			intersects = nodes_intersects(pol->nodes,
+						      task->mems_allowed);
+			task_unlock(task);
+			if (intersects)
+				nodemask = &pol->nodes;
+		}
 		if (pol->home_node != NUMA_NO_NODE)
 			*nid = pol->home_node;
 		/*
@@ -2239,7 +2249,7 @@ int huge_node(struct vm_area_struct *vma, unsigned long addr, gfp_t gfp_flags,
 	*mpol = get_vma_policy(vma, addr, hstate_vma(vma)->order, &ilx);
 	mpol_get(*mpol);
 	task_unlock(current);
-	*nodemask = policy_nodemask(gfp_flags, *mpol, ilx, &nid);
+	*nodemask = policy_nodemask(current, gfp_flags, *mpol, ilx, &nid);
 
 	mpol_put(*mpol);
 	return nid;
@@ -2356,7 +2366,7 @@ struct page *alloc_pages_mpol(gfp_t gfp, unsigned int order,
 	nodemask_t *nodemask;
 	struct page *page;
 
-	nodemask = policy_nodemask(gfp, pol, ilx, &nid);
+	nodemask = policy_nodemask(current, gfp, pol, ilx, &nid);
 
 	if (pol->mode == MPOL_PREFERRED_MANY)
 		return alloc_pages_preferred_many(gfp, order, nid, nodemask);
@@ -2559,7 +2569,8 @@ unsigned long alloc_pages_bulk_array_mempolicy(gfp_t gfp,
 				numa_node_id(), pol, nr_pages, page_array);
 
 	nid = numa_node_id();
-	nodemask = policy_nodemask(gfp, pol, NO_INTERLEAVE_INDEX, &nid);
+	nodemask = policy_nodemask(current, gfp, pol, NO_INTERLEAVE_INDEX,
+				   &nid);
 	return __alloc_pages_bulk(gfp, nid, nodemask,
 				  nr_pages, NULL, page_array);
 }
