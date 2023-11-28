@@ -2838,15 +2838,20 @@ done:
 	return retval;
 }
 
-bool current_cpuset_is_being_rebound(void)
+bool task_cpuset_is_being_rebound(struct task_struct *task)
 {
 	bool ret;
 
 	rcu_read_lock();
-	ret = task_cs(current) == cpuset_being_rebound;
+	ret = task_cs(task) == cpuset_being_rebound;
 	rcu_read_unlock();
 
 	return ret;
+}
+
+bool current_cpuset_is_being_rebound(void)
+{
+	return task_cpuset_is_being_rebound(current);
 }
 
 static int update_relax_domain_level(struct cpuset *cs, s64 val)
