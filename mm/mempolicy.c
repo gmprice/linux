@@ -2758,7 +2758,7 @@ int mpol_misplaced(struct folio *folio, struct vm_area_struct *vma,
 
 	task_lock(current);
 	pol = get_vma_policy(vma, addr, folio_order(folio), &ilx);
-	mpol_get(current);
+	mpol_get(pol);
 	task_unlock(current);
 	if (!(pol->flags & MPOL_F_MOF))
 		goto out;
