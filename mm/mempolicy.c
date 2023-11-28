@@ -2030,6 +2030,9 @@ static struct mempolicy *get_task_vma_policy(struct task_struct *task,
  * count--added by the get_policy() vm_op, as appropriate--to protect against
  * freeing by another task.  It is the caller's responsibility to free the
  * extra reference for shared policies.
+ *
+ * Caller must hold alloc/task lock while calling, and must take reference,
+ * to protect against changing mempolicy.
  */
 struct mempolicy *get_vma_policy(struct vm_area_struct *vma,
 				 unsigned long addr, int order, pgoff_t *ilx)
@@ -2232,8 +2235,13 @@ int huge_node(struct vm_area_struct *vma, unsigned long addr, gfp_t gfp_flags,
 	int nid;
 
 	nid = numa_node_id();
+	task_lock(current);
 	*mpol = get_vma_policy(vma, addr, hstate_vma(vma)->order, &ilx);
+	mpol_get(*mpol);
+	task_unlock(current);
 	*nodemask = policy_nodemask(gfp_flags, *mpol, ilx, &nid);
+
+	mpol_put(*mpol);
 	return nid;
 }
 
@@ -2423,9 +2431,13 @@ struct folio *vma_alloc_folio(gfp_t gfp, int order, struct vm_area_struct *vma,
 	pgoff_t ilx;
 	struct page *page;
 
+	task_lock(current);
 	pol = get_vma_policy(vma, addr, order, &ilx);
+	mpol_get(pol);
+	task_unlock(current);
 	page = alloc_pages_mpol(gfp | __GFP_COMP, order,
 				pol, ilx, numa_node_id());
+	mpol_put(pol);
 	mpol_cond_put(pol);
 	return page_rmappable_folio(page);
 }
@@ -2744,7 +2756,10 @@ int mpol_misplaced(struct folio *folio, struct vm_area_struct *vma,
 	int polnid = NUMA_NO_NODE;
 	int ret = NUMA_NO_NODE;
 
+	task_lock(current);
 	pol = get_vma_policy(vma, addr, folio_order(folio), &ilx);
+	mpol_get(current);
+	task_unlock(current);
 	if (!(pol->flags & MPOL_F_MOF))
 		goto out;
 
@@ -2803,6 +2818,7 @@ int mpol_misplaced(struct folio *folio, struct vm_area_struct *vma,
 	if (curnid != polnid)
 		ret = polnid;
 out:
+	mpol_put(pol);
 	mpol_cond_put(pol);
 
 	return ret;
