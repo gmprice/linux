@@ -859,6 +859,30 @@ static long do_set_mempolicy(struct task_struct *task, unsigned short mode,
 	return ret;
 }
 
+static long do_set_mempolicy_args(struct task_struct *task,
+				  struct mpol_args *args)
+{
+	struct mempolicy *new;
+	nodemask_t nodes;
+	int ret;
+
+	ret = get_nodes(&nodes, args->pol_nodemask, args->pol_maxnode);
+	if (ret)
+		return ret;
+
+	new = mpol_new(args->mode, args->flags, &nodes);
+	if (IS_ERR(new))
+		return PTR_ERR(new);
+
+	/* Future extensions are handled here */
+
+	ret = replace_mempolicy(task, new, nodes);
+	if (ret)
+		mpol_put(new);
+
+	return ret
+}
+
 /*
  * Return nodemask for policy for get_mempolicy() query
  *
@@ -1584,38 +1608,57 @@ SYSCALL_DEFINE6(mbind, unsigned long, start, unsigned long, len,
 }
 
 /* Set the process memory policy */
-static long kernel_set_mempolicy(struct task_struct *task, int mode,
-				 const unsigned long __user *nmask,
-				 unsigned long maxnode)
+static long kernel_set_mempolicy(struct task_struct *task,
+				 struct task_mempolicy *args)
 {
 	unsigned short mode_flags;
 	nodemask_t nodes;
-	int lmode = mode;
+	int lmode = args->mode;
 	int err;
 
-	err = sanitize_mpol_flags(&lmode, &mode_flags);
+	err = sanitize_mpol_flags(&lmode, &args->mode_flags);
 	if (err)
 		return err;
 
-	err = get_nodes(&nodes, nmask, maxnode);
-	if (err)
-		return err;
-
-	return do_set_mempolicy(task, lmode, mode_flags, &nodes);
+	return do_set_mempolicy_args(task, args);
 }
 
 SYSCALL_DEFINE3(set_mempolicy, int, mode, const unsigned long __user *, nmask,
 		unsigned long, maxnode)
 {
-	return kernel_set_mempolicy(current, mode, nmask, maxnode);
+	struct task_mempolicy args;
+
+	memset(&args, '\0', sizeof(args));
+	args.mode = mode;
+	args.pol_nodemask = nmask;
+	args.pol_maxnode = maxnode;
+
+	return kernel_set_mempolicy(current, args);
 }
 
-SYSCALL_DEFINE4(process_set_mempolicy, int, pidfd, int, mode,
-		const unsigned long __user *, nmask, unsigned long, maxnode)
+SYSCALL_DEFINE2(set_mempolicy2, const struct mpol_args __user *, uargs,
+		size_t, usize)
 {
+	struct mpol kargs;
+
+	err = copy_struct_from_user(&kargs, sizeof(kargs), uargs, usize);
+	if (err)
+		return err;
+
+	return kernel_set_mempolicy(current, kargs);
+}
+
+SYSCALL_DEFINE4(process_set_mempolicy, int, pidfd,
+		const struct task_mempolicy __user *, uargs, size_t, usize)
+{
+	struct task_mempolicy kargs;
 	struct task_struct *task;
 	unsigned int f_flags;
 	int err;
+
+	err = copy_struct_from_user(&kargs, sizeof(kargs), uargs, usize);
+	if (err)
+		return err;
 
 	if (!capable(CAP_SYS_NICE) ||
 	    !ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS))
@@ -1625,7 +1668,7 @@ SYSCALL_DEFINE4(process_set_mempolicy, int, pidfd, int, mode,
 	if (IS_ERR(task))
 		return PTR_ERR(task);
 
-	err = kernel_set_mempolicy(task, mode, nmask, maxnode);
+	err = kernel_set_mempolicy(task, kargs);
 
 	put_task_struct(task);
 	return err;
@@ -1765,10 +1808,81 @@ SYSCALL_DEFINE5(get_mempolicy, int __user *, policy,
 				    maxnode, addr, flags);
 }
 
-SYSCALL_DEFINE6(process_get_mempolicy, int, pidfd, int __user *, policy,
-		unsigned long __user *, nmask, unsigned long, maxnode,
-		unsigned long, addr, unsigned long, flags)
+static long kernel_do_get_mempolicy2(struct task_struct *task,
+				     struct mm_struct *mm,
+				     struct mpol_args *args)
 {
+	struct mempolicy *pol;
+	int policy_node = 0;
+
+	if (args->mode_flags & MPOL_F_ADDR) {
+		pgoff_t ilx;
+
+		/* First get the policy that applies to that addres */
+		mmap_read_lock(mm);
+		vma = vma_lookup(mm, args->addr)
+		if (!vma) {
+			mmap_read_unlock(mm);
+			return -EFAULT;
+		}
+		pol = pol_refcount = __get_vma_policy(vma, args->addr, &ilx);
+		mpol_get(pol);
+		mmap_read_unlock(mm);
+
+		/* Now fetch the node that applies to that address */
+		err = lookup_node(mm, addr);
+		if (err < 0)
+			goto out;
+		policy_node = err;
+	} else {
+		task_lock(task);
+		pol = task->mempolicy;
+		if (pol->mode == MPOL_INTERLEAVE)
+			policy_node = next_node_in(task->il_prev, pol->nodes);
+		mpol_get(pol);
+		task_unlock(task);
+	}
+
+	if (!pol) {
+		pol = &default_policy;
+		mpol_get(pol);
+	}
+
+	if (args->nodemask) {
+		err = copy_nodes_to_user(args->nodemask, args->maxnode, &nodes);
+		if (err)
+			goto out;
+	}
+
+	args->mode = pol->mode;
+	args->mode_flags = (pol->flags & MPOL_MODE_FLAGS);
+	args->policy_node = policy_node;
+out:
+	mpol_put(pol);
+	if (pol_refcount)
+		mpol_cond_put(pol_refcount);
+	return err;
+}
+
+SYSCALL_DEFINE2(get_mempolicy2, struct mpol_args __user *, uargs, size_t, usize)
+{
+	struct mpol_args kargs;
+	int err;
+
+	err = copy_struct_from_user(&kargs, sizeof(kargs), uargs, usize);
+	if (err)
+		return err;
+
+	err = kernel_do_get_mempolicy2(current, current->mm, &kargs);
+
+	return args;
+}
+
+SYSCALL_DEFINE6(process_get_mempolicy, int, pidfd,
+		struct mpol_args __user *, uargs,
+		size_t, usize)
+{
+	struct mpol_args kargs;
 	struct task_struct *task;
 	struct mm_struct *mm;
 	unsigned int f_flags;
@@ -1776,6 +1890,10 @@ SYSCALL_DEFINE6(process_get_mempolicy, int, pidfd, int __user *, policy,
 
 	if (!capable(CAP_SYS_NICE))
 		return -EPERM;
+
+	err = copy_struct_from_user(&kargs, sizeof(kargs), uargs, usize);
+	if (err)
+		return err;
 
 	task = pidfd_get_task(pidfd, &f_flags);
 	if (IS_ERR(task))
@@ -1788,7 +1906,7 @@ SYSCALL_DEFINE6(process_get_mempolicy, int, pidfd, int __user *, policy,
 		goto release_task;
 	}
 
-	err = kernel_get_mempolicy(task, mm, policy, nmask, maxnode, addr, flags);
+	err = kernel_get_mempolicy2(task, mm, &kargs);
 	mmput(mm);
 release_task:
 	put_task_struct(task);
