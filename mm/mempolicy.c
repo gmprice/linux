@@ -1659,6 +1659,42 @@ SYSCALL_DEFINE3(set_mempolicy, int, mode, const unsigned long __user *, nmask,
 	return kernel_set_mempolicy(mode, nmask, maxnode);
 }
 
+SYSCALL_DEFINE3(set_mempolicy2, struct mpol_param __user *, uparam,
+		size_t, usize, unsigned long, flags)
+{
+	struct mpol_param kparam;
+	struct mempolicy_param mparam;
+	int err;
+	nodemask_t policy_nodemask;
+	unsigned long __user *nodes_ptr;
+
+	if (flags)
+		return -EINVAL;
+
+	err = copy_struct_from_user(&kparam, sizeof(kparam), uparam, usize);
+	if (err)
+		return err;
+
+	err = validate_mpol_flags(kparam.mode, &kparam.mode_flags);
+	if (err)
+		return err;
+
+	memset(&mparam, 0, sizeof(mparam));
+	mparam.mode = kparam.mode;
+	mparam.mode_flags = kparam.mode_flags;
+	if (kparam.pol_nodes) {
+		nodes_ptr = u64_to_user_ptr(kparam.pol_nodes);
+		err = get_nodes(&policy_nodemask, nodes_ptr,
+				kparam.pol_maxnodes);
+		if (err)
+			return err;
+		mparam.policy_nodes = &policy_nodemask;
+	} else
+		mparam.policy_nodes = NULL;
+
+	return do_set_mempolicy(&mparam);
+}
+
 static int kernel_migrate_pages(pid_t pid, unsigned long maxnode,
 				const unsigned long __user *old_nodes,
 				const unsigned long __user *new_nodes)
