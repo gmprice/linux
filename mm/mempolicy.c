@@ -1626,6 +1626,49 @@ SYSCALL_DEFINE6(mbind, unsigned long, start, unsigned long, len,
 	return kernel_mbind(start, len, mode, nmask, maxnode, flags);
 }
 
+SYSCALL_DEFINE5(mbind2, unsigned long, start, unsigned long, len,
+		const struct mpol_param __user *, uparam, size_t, usize,
+		unsigned long, flags)
+{
+	struct mpol_param kparam;
+	struct mempolicy_param mparam;
+	nodemask_t policy_nodes;
+	unsigned long __user *nodes_ptr;
+	int err;
+
+	if (!start || !len)
+		return -EINVAL;
+
+	err = copy_struct_from_user(&kparam, sizeof(kparam), uparam, usize);
+	if (err)
+		return -EINVAL;
+
+	err = validate_mpol_flags(kparam.mode, &kparam.mode_flags);
+	if (err)
+		return err;
+
+	mparam.mode = kparam.mode;
+	mparam.mode_flags = kparam.mode_flags;
+
+	/* if home node given, validate it is online */
+	if (flags & MPOL_MF_HOME_NODE) {
+		if ((kparam.home_node >= MAX_NUMNODES) ||
+			!node_online(kparam.home_node))
+			return -EINVAL;
+		mparam.home_node = kparam.home_node;
+	} else
+		mparam.home_node = NUMA_NO_NODE;
+	flags &= ~MPOL_MF_HOME_NODE;
+
+	nodes_ptr = u64_to_user_ptr(kparam.pol_nodes);
+	err = get_nodes(&policy_nodes, nodes_ptr, kparam.pol_maxnodes);
+	if (err)
+		return err;
+	mparam.policy_nodes = &policy_nodes;
+
+	return do_mbind(untagged_addr(start), len, &mparam, flags);
+}
+
 /* Set the process memory policy */
 static long kernel_set_mempolicy(int mode, const unsigned long __user *nmask,
 				 unsigned long maxnode)
