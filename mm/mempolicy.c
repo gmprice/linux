@@ -1887,6 +1887,48 @@ SYSCALL_DEFINE5(get_mempolicy, int __user *, policy,
 	return kernel_get_mempolicy(policy, nmask, maxnode, addr, flags);
 }
 
+SYSCALL_DEFINE4(get_mempolicy2, struct mpol_param __user *, uparam, size_t, usize,
+		unsigned long, addr, unsigned long, flags)
+{
+	struct mpol_param kparam;
+	struct mempolicy_param mparam;
+	int err;
+	nodemask_t policy_nodemask;
+	unsigned long __user *nodes_ptr;
+
+	if (flags & ~(MPOL_F_ADDR))
+		return -EINVAL;
+
+	/* initialize any memory liable to be copied to userland */
+	memset(&mparam, 0, sizeof(mparam));
+
+	err = copy_struct_from_user(&kparam, sizeof(kparam), uparam, usize);
+	if (err)
+		return -EINVAL;
+
+	mparam.policy_nodes = kparam.pol_nodes ? &policy_nodemask : NULL;
+	if (flags & MPOL_F_ADDR)
+		err = do_get_vma_mempolicy(untagged_addr(addr), NULL, &mparam);
+	else
+		err = do_get_task_mempolicy(&mparam, NULL);
+
+	if (err)
+		return err;
+
+	kparam.mode = mparam.mode;
+	kparam.mode_flags = mparam.mode_flags;
+	kparam.home_node = mparam.home_node;
+	if (kparam.pol_nodes) {
+		nodes_ptr = u64_to_user_ptr(kparam.pol_nodes);
+		err = copy_nodes_to_user(nodes_ptr, kparam.pol_maxnodes,
+					 mparam.policy_nodes);
+		if (err)
+			return err;
+	}
+
+	return copy_to_user(uparam, &kparam, usize) ? -EFAULT : 0;
+}
+
 bool vma_migratable(struct vm_area_struct *vma)
 {
 	if (vma->vm_flags & (VM_IO | VM_PFNMAP))
