@@ -77,6 +77,7 @@ struct cachestat_range;
 struct cachestat;
 struct statmount;
 struct mnt_id_req;
+struct mpol_param;
 
 #include <linux/types.h>
 #include <linux/aio_abi.h>

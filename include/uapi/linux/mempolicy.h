@@ -7,6 +7,7 @@
 #define _UAPI_LINUX_MEMPOLICY_H
 
 #include <linux/errno.h>
+#include <linux/types.h>
 
 
 /*
@@ -25,6 +26,15 @@ enum {
 	MPOL_PREFERRED_MANY,
 	MPOL_WEIGHTED_INTERLEAVE,
 	MPOL_MAX,	/* always last member of enum */
+};
+
+struct mpol_param {
+	__u16 mode;
+	__u16 mode_flags;
+	__s32 home_node;	/* mbind2: policy home node */
+	__u16 pol_maxnodes;
+	__u8 resv[6];
+	__aligned_u64 pol_nodes;
 };
 
 /* Flags for set_mempolicy */
