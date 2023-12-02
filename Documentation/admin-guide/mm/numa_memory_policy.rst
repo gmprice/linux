@@ -254,10 +254,21 @@ MPOL_WEIGHTED_INTERLEAVE
 	This mode operates the same as MPOL_INTERLEAVE, except that
 	interleaving behavior is executed based on weights set in
 	/sys/kernel/mm/mempolicy/weighted_interleave/
+	when configured to utilize global weights, or based on task-local
+	weights configured with set_mempolicy2(2) or mbind2(2).
 
 	Weighted interleave allocates pages on nodes according to a
 	weight.  For example if nodes [0,1] are weighted [5,2], 5 pages
 	will be allocated on node0 for every 2 pages allocated on node1.
+
+	When utilizing task-local weights, if node's is not set in the
+	nodemask, or its weight was set to 0, the local weight will be
+	set to the system default.  Updates to system default weights
+	will not be refleted in local weights.
+
+	The minimum weight for a node set in the policy nodemask is
+	always 1. If no allocations on a node, the node should be
+	removed from the nodemask.
 
 NUMA memory policy supports the following optional mode flags:
 
@@ -515,6 +526,7 @@ Extended Mempolicy Arguments::
 		__u16 pol_maxnodes;
 		__u8 resv[6];
 		__aligned_u64 pol_nodes; /* nodemask pointer */
+		__aligned_u64 il_weights;  /* u8 buf of size pol_maxnodes */
 	};
 
 The extended mempolicy argument structure is defined to allow the mempolicy

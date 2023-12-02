@@ -300,6 +300,7 @@ static struct mempolicy *mpol_new(struct mempolicy_param *param)
 	unsigned short mode = param->mode;
 	unsigned short flags = param->mode_flags;
 	nodemask_t *nodes = param->policy_nodes;
+	int node;
 
 	if (mode == MPOL_DEFAULT) {
 		if (nodes && !nodes_empty(*nodes))
@@ -337,6 +338,24 @@ static struct mempolicy *mpol_new(struct mempolicy_param *param)
 	policy->flags = flags;
 	policy->home_node = param->home_node;
 	policy->wil.cur_weight = 0;
+	memset(policy->wil.weights, 0, MAX_NUMNODES);
+
+	/* If user provides weights, ensure all weights are set to something */
+	rcu_read_lock();
+	if (policy->mode == MPOL_WEIGHTED_INTERLEAVE && param->il_weights) {
+		struct iw_table __rcu *table = rcu_dereference(iw_table);
+
+		for (node = 0; node < MAX_NUMNODES; node++) {
+			u8 weight = 0;
+
+			if (node_isset(node, *nodes))
+				weight = param->il_weights[node];
+			/* If a user sets a weight to 0, use global default */
+			policy->wil.weights[node] = weight ? weight :
+						    table->weights[node];
+		}
+	}
+	rcu_read_unlock();
 
 	return policy;
 }
@@ -966,6 +985,26 @@ static void do_get_mempolicy_nodemask(struct mempolicy *pol, nodemask_t *nmask)
 	}
 }
 
+static void do_get_mempolicy_il_weights(struct mempolicy *pol,
+					u8 weights[MAX_NUMNODES])
+{
+	int i = 0;
+	struct iw_table __rcu *table;
+
+	if (pol->mode != MPOL_WEIGHTED_INTERLEAVE) {
+		memset(weights, 0, MAX_NUMNODES);
+		return;
+	}
+
+	rcu_read_lock();
+	table = rcu_dereference(iw_table);
+	for (i = 0; i < MAX_NUMNODES; i++) {
+		weights[i] = pol->wil.weights[i] ? pol->wil.weights[i] :
+			     table->weights[i];
+	}
+	rcu_read_unlock();
+}
+
 /* Retrieve NUMA policy for a VMA assocated with a given address  */
 static long do_get_vma_mempolicy(unsigned long addr, int *addr_node,
 				 struct mempolicy_param *param)
@@ -999,6 +1038,9 @@ static long do_get_vma_mempolicy(unsigned long addr, int *addr_node,
 	if (param->policy_nodes)
 		do_get_mempolicy_nodemask(pol, param->policy_nodes);
 
+	if (param->il_weights)
+		do_get_mempolicy_il_weights(pol, param->il_weights);
+
 	if (pol != &default_policy) {
 		mpol_put(pol);
 		mpol_cond_put(pol);
@@ -1025,6 +1067,9 @@ static long do_get_task_mempolicy(struct mempolicy_param *param, int *pol_node)
 
 	if (param->policy_nodes)
 		do_get_mempolicy_nodemask(pol, param->policy_nodes);
+
+	if (param->il_weights)
+		do_get_mempolicy_il_weights(pol, param->il_weights);
 
 	return 0;
 }
@@ -1634,6 +1679,8 @@ SYSCALL_DEFINE5(mbind2, unsigned long, start, unsigned long, len,
 	struct mempolicy_param mparam;
 	nodemask_t policy_nodes;
 	unsigned long __user *nodes_ptr;
+	u8 *weights = NULL;
+	u8 __user *weights_ptr;
 	int err;
 
 	if (!start || !len)
@@ -1666,7 +1713,27 @@ SYSCALL_DEFINE5(mbind2, unsigned long, start, unsigned long, len,
 		return err;
 	mparam.policy_nodes = &policy_nodes;
 
-	return do_mbind(untagged_addr(start), len, &mparam, flags);
+	if (kparam.mode == MPOL_WEIGHTED_INTERLEAVE) {
+		weights_ptr = u64_to_user_ptr(kparam.il_weights);
+		if (weights_ptr) {
+			weights = kzalloc(MAX_NUMNODES,
+					  GFP_KERNEL | __GFP_NORETRY);
+			if (!weights)
+				return -ENOMEM;
+			err = copy_struct_from_user(weights,
+						    MAX_NUMNODES,
+						    weights_ptr,
+						    kparam.pol_maxnodes);
+			if (err)
+				goto leave_weights;
+		}
+	}
+	mparam.il_weights = weights;
+
+	err = do_mbind(untagged_addr(start), len, &mparam, flags);
+leave_weights:
+	kfree(weights);
+	return err;
 }
 
 /* Set the process memory policy */
@@ -1710,6 +1777,8 @@ SYSCALL_DEFINE3(set_mempolicy2, struct mpol_param __user *, uparam,
 	int err;
 	nodemask_t policy_nodemask;
 	unsigned long __user *nodes_ptr;
+	u8 *weights = NULL;
+	u8 __user *weights_ptr;
 
 	if (flags)
 		return -EINVAL;
@@ -1735,7 +1804,24 @@ SYSCALL_DEFINE3(set_mempolicy2, struct mpol_param __user *, uparam,
 	} else
 		mparam.policy_nodes = NULL;
 
-	return do_set_mempolicy(&mparam);
+	if (kparam.mode == MPOL_WEIGHTED_INTERLEAVE && kparam.il_weights) {
+		weights = kzalloc(MAX_NUMNODES, GFP_KERNEL | __GFP_NORETRY);
+		if (!weights)
+			return -ENOMEM;
+		weights_ptr = u64_to_user_ptr(kparam.il_weights);
+		err = copy_struct_from_user(weights,
+					    MAX_NUMNODES,
+					    weights_ptr,
+					    kparam.pol_maxnodes);
+		if (err)
+			goto leave_weights;
+	}
+	mparam.il_weights = weights;
+
+	err = do_set_mempolicy(&mparam);
+leave_weights:
+	kfree(weights);
+	return err;
 }
 
 static int kernel_migrate_pages(pid_t pid, unsigned long maxnode,
@@ -1938,6 +2024,8 @@ SYSCALL_DEFINE4(get_mempolicy2, struct mpol_param __user *, uparam, size_t, usiz
 	int err;
 	nodemask_t policy_nodemask;
 	unsigned long __user *nodes_ptr;
+	u8 __user *weights_ptr;
+	u8 *weights = NULL;
 
 	if (flags & ~(MPOL_F_ADDR))
 		return -EINVAL;
@@ -1949,6 +2037,13 @@ SYSCALL_DEFINE4(get_mempolicy2, struct mpol_param __user *, uparam, size_t, usiz
 	if (err)
 		return -EINVAL;
 
+	if (kparam.il_weights) {
+		weights = kzalloc(MAX_NUMNODES, GFP_KERNEL | __GFP_NORETRY);
+		if (!weights)
+			return -ENOMEM;
+	}
+	mparam.il_weights = weights;
+
 	mparam.policy_nodes = kparam.pol_nodes ? &policy_nodemask : NULL;
 	if (flags & MPOL_F_ADDR)
 		err = do_get_vma_mempolicy(untagged_addr(addr), NULL, &mparam);
@@ -1956,7 +2051,7 @@ SYSCALL_DEFINE4(get_mempolicy2, struct mpol_param __user *, uparam, size_t, usiz
 		err = do_get_task_mempolicy(&mparam, NULL);
 
 	if (err)
-		return err;
+		goto leave_weights;
 
 	kparam.mode = mparam.mode;
 	kparam.mode_flags = mparam.mode_flags;
@@ -1966,10 +2061,21 @@ SYSCALL_DEFINE4(get_mempolicy2, struct mpol_param __user *, uparam, size_t, usiz
 		err = copy_nodes_to_user(nodes_ptr, kparam.pol_maxnodes,
 					 mparam.policy_nodes);
 		if (err)
-			return err;
+			goto leave_weights;
 	}
 
-	return copy_to_user(uparam, &kparam, usize) ? -EFAULT : 0;
+	if (kparam.mode == MPOL_WEIGHTED_INTERLEAVE && kparam.il_weights) {
+		weights_ptr = u64_to_user_ptr(kparam.il_weights);
+		if (copy_to_user(weights_ptr, weights, kparam.pol_maxnodes)) {
+			err = -EFAULT;
+			goto leave_weights;
+		}
+	}
+
+	err = copy_to_user(uparam, &kparam, usize) ? -EFAULT : 0;
+leave_weights:
+	kfree(weights);
+	return err;
 }
 
 bool vma_migratable(struct vm_area_struct *vma)
@@ -2093,8 +2199,11 @@ static unsigned int weighted_interleave_nodes(struct mempolicy *policy)
 
 	rcu_read_lock();
 	table = rcu_dereference(iw_table);
-	if (!policy->wil.cur_weight)
-		policy->wil.cur_weight = table->weights[next];
+	if (!policy->wil.cur_weight) {
+		policy->wil.cur_weight = policy->wil.weights[next] ?
+					 policy->wil.weights[next] :
+					 table->weights[next];
+	}
 	rcu_read_unlock();
 
 	policy->wil.cur_weight--;
@@ -2194,14 +2303,18 @@ static unsigned int weighted_interleave_nid(struct mempolicy *pol, pgoff_t ilx)
 	rcu_read_lock();
 	table = rcu_dereference(iw_table);
 	/* calculate the total weight */
-	for_each_node_mask(nid, nodemask)
-		weight_total += table->weights[nid];
+	for_each_node_mask(nid, nodemask) {
+		weight_total += pol->wil.weights[nid] ?
+				pol->wil.weights[nid] :
+				table->weights[nid];
+	}
 
 	/* Calculate the node offset based on totals */
 	target = ilx % weight_total;
 	nid = first_node(nodemask);
 	while (target) {
-		weight = table->weights[nid];
+		weight = pol->wil.weights[nid] ? pol->wil.weights[nid] :
+			 table->weights[nid];
 		if (target < weight)
 			break;
 		target -= weight;
@@ -2627,8 +2740,10 @@ static unsigned long alloc_pages_bulk_array_weighted_interleave(gfp_t gfp,
 	table = rcu_dereference(iw_table);
 	weight_nodes = 0;
 	for_each_node_mask(node, nodes) {
-		weights[weight_nodes++] = table->weights[node];
-		weight_total += table->weights[node];
+		weight = pol->wil.weights[node] ? pol->wil.weights[node] :
+			 table->weights[node];
+		weights[weight_nodes++] = weight;
+		weight_total += weight;
 	}
 	rcu_read_unlock();
 
@@ -3138,21 +3253,28 @@ void mpol_shared_policy_init(struct shared_policy *sp, struct mempolicy *mpol)
 	if (mpol) {
 		struct sp_node *sn;
 		struct mempolicy *npol;
+		u8 *weights = NULL;
 		NODEMASK_SCRATCH(scratch);
 
 		if (!scratch)
 			goto put_mpol;
+
+		weights = kzalloc(MAX_NUMNODES, GFP_KERNEL | __GFP_NORETRY);
+		if (!weights)
+			goto free_scratch;
+		memcpy(weights, mpol->wil.weights, sizeof(MAX_NUMNODES));
 
 		memset(&mparam, 0, sizeof(mparam));
 		mparam.mode = mpol->mode;
 		mparam.mode_flags = mpol->flags;
 		mparam.policy_nodes = &mpol->w.user_nodemask;
 		mparam.home_node = NUMA_NO_NODE;
+		mparam.il_weights = weights;
 
 		/* contextualize the tmpfs mount point mempolicy to this file */
 		npol = mpol_new(&mparam);
 		if (IS_ERR(npol))
-			goto free_scratch; /* no valid nodemask intersection */
+			goto free_weights; /* no valid nodemask intersection */
 
 		task_lock(current);
 		ret = mpol_set_nodemask(npol, &mpol->w.user_nodemask, scratch);
@@ -3166,6 +3288,8 @@ void mpol_shared_policy_init(struct shared_policy *sp, struct mempolicy *mpol)
 			sp_insert(sp, sn);
 put_npol:
 		mpol_put(npol);	/* drop initial ref on file's npol */
+free_weights:
+		kfree(weights);
 free_scratch:
 		NODEMASK_SCRATCH_FREE(scratch);
 put_mpol:

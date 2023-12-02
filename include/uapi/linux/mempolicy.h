@@ -35,6 +35,7 @@ struct mpol_param {
 	__u16 pol_maxnodes;
 	__u8 resv[6];
 	__aligned_u64 pol_nodes;
+	__aligned_u64 il_weights; /* size: pol_maxnodes * sizeof(__u8) */
 };
 
 /* Flags for set_mempolicy */

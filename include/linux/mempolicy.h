@@ -58,6 +58,7 @@ struct mempolicy {
 	/* Weighted interleave settings */
 	struct {
 		u8 cur_weight;
+		u8 weights[MAX_NUMNODES];
 	} wil;
 };
 
@@ -70,6 +71,7 @@ struct mempolicy_param {
 	unsigned short mode_flags;	/* policy mode flags */
 	int home_node;			/* mbind: use MPOL_MF_HOME_NODE */
 	nodemask_t *policy_nodes;	/* get/set/mbind */
+	u8 *il_weights;			/* for mode MPOL_WEIGHTED_INTERLEAVE */
 };
 
 /*
