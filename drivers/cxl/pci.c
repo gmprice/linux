@@ -774,7 +774,7 @@ static int cxl_event_config(struct pci_host_bridge *host_bridge,
 	    cxl_event_int_is_fw(policy.fatal_settings)) {
 		dev_err(mds->cxlds.dev,
 			"FW still in control of Event Logs despite _OSC settings\n");
-		return -EBUSY;
+		//return -EBUSY;
 	}
 
 	rc = cxl_event_irqsetup(mds);
