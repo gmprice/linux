@@ -842,8 +842,15 @@ __SYSCALL(__NR_lsm_set_self_attr, sys_lsm_set_self_attr)
 #define __NR_lsm_list_modules 461
 __SYSCALL(__NR_lsm_list_modules, sys_lsm_list_modules)
 
+#define __NR_set_mempolicy2 462
+__SYSCALL(__NR_set_mempolicy2, sys_set_mempolicy2)
+#define __NR_get_mempolicy2 463
+__SYSCALL(__NR_get_mempolicy2, sys_get_mempolicy2)
+#define __NR_mbind2 464
+__SYSCALL(__NR_mbind2, sys_mbind2)
+
 #undef __NR_syscalls
-#define __NR_syscalls 462
+#define __NR_syscalls 465
 
 /*
  * 32 bit systems traditionally used different

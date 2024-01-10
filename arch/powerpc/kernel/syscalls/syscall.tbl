@@ -548,3 +548,6 @@
 459	common	lsm_get_self_attr		sys_lsm_get_self_attr
 460	common	lsm_set_self_attr		sys_lsm_set_self_attr
 461	common	lsm_list_modules		sys_lsm_list_modules
+462	common	set_mempolicy2			sys_set_mempolicy2
+463	common	get_mempolicy2			sys_get_mempolicy2
+464	common	mbind2				sys_mbind2
