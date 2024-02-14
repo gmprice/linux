@@ -7,6 +7,7 @@
 #include <linux/init.h>
 #include <linux/mm.h>
 #include <linux/memory.h>
+#include <linux/mempolicy.h>
 #include <linux/vmstat.h>
 #include <linux/notifier.h>
 #include <linux/node.h>
@@ -214,6 +215,9 @@ void node_set_perf_attrs(unsigned int nid, struct access_coordinate *coord,
 			break;
 		}
 	}
+
+	if (mempolicy_set_node_perf(nid, coord))
+		pr_info("failed to set node(%d) mempolicy perf attributes\n", nid);
 }
 EXPORT_SYMBOL_GPL(node_set_perf_attrs);
 

@@ -20,6 +20,7 @@
 #include <linux/list_sort.h>
 #include <linux/memregion.h>
 #include <linux/memory.h>
+#include <linux/mempolicy.h>
 #include <linux/mutex.h>
 #include <linux/node.h>
 #include <linux/sysfs.h>
@@ -353,6 +354,7 @@ int hmat_update_target_coordinates(int nid, struct access_coordinate *coord,
 	hmat_update_target_access(target, ACPI_HMAT_WRITE_BANDWIDTH,
 				  coord->write_bandwidth, access);
 	target->ext_updated = true;
+	mempolicy_set_node_perf(nid, &target->coord[access]);
 
 	return 0;
 }
